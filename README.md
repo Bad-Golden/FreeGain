@@ -54,7 +54,25 @@ Console-specific setup:
   different one, see [Console options](#console-options).
 - **Behringer Wing:** OSC must be enabled in the Wing's remote settings.
 
-## Quick start (Windows)
+## Download (no install needed)
+
+**Windows:** download `FreeGain-Windows.zip`, unzip it and double-click
+**`FreeGain.exe`**. It's a single self-contained file, so there's no Python
+or anything else to install. The app isn't code-signed yet, so the first
+launch may show "Windows protected your PC": click **More info → Run
+anyway**.
+
+**Mac:** download `FreeGain-macOS.zip`, unzip it and drag `FreeGain.app`
+to Applications. The first time, right-click it and choose **Open**.
+
+The downloads are built automatically by GitHub Actions
+(`.github/workflows/build.yml`). Every push produces them under the run's
+**Artifacts**, and pushing a tag like `v1.0.0` publishes them as a GitHub
+Release. To build the Windows exe yourself, run
+`packaging\build_windows.bat`, or on any OS:
+`pyinstaller packaging/freegain.spec`.
+
+## Running from source (Windows)
 
 1. Install Python 3.10 or newer from [python.org](https://www.python.org/downloads/).
    Tick **"Add python.exe to PATH"** in the installer.
@@ -71,7 +89,7 @@ pip install -r requirements.txt
 python freegain_app.py
 ```
 
-## Quick start (Mac)
+## Running from source (Mac)
 
 ```
 python3 -m venv .venv
@@ -84,8 +102,9 @@ python3 -m venv .venv
 1. **Console.** Pick the brand and model, or "Any console (audio only)".
 2. **Audio in / out.** Pick the console's audio interface and press
    **Apply**. Each device shows its driver type in brackets. On Windows,
-   choose the **[ASIO]** or **[Windows WASAPI]** entry for multichannel
-   interfaces; the [MME] entry often shows only 2 channels. The status line
+   choose the **[ASIO]** entry if there is one (most console USB drivers
+   and Dante Virtual Soundcard), otherwise **[Windows WASAPI]**. The [MME]
+   entry often shows only 2 channels. The status line
    at the bottom shows the sample rate in use, which is the device's native
    rate. Press ↻ if you plugged the interface in after starting the app.
 3. **Vocal mic input / Reference input.** Pick which input carries the vocal
@@ -110,7 +129,10 @@ python3 -m venv .venv
    untouched.
 
 Settings (IP, console model, devices, channels, gate) are saved to
-`local_config.json` when you close the window.
+`local_config.json` when you close the window. That file sits next to
+`freegain_app.py` when running from source, in `%APPDATA%\FreeGain` for
+the Windows exe, and in `~/Library/Application Support/FreeGain` for the
+Mac app.
 
 ### Console options
 
@@ -154,7 +176,8 @@ zero-padded numbers. The `*_values` pairs are `[unmuted, muted]`.
 | `consoles/allen_heath.py` | Allen & Heath MIDI-over-TCP driver |
 | `consoles/soundcraft_ui.py` | Soundcraft Ui WebSocket driver |
 | `benchmark.py` | Measures real-time headroom on your machine |
-| `run_freegain.bat` | One-click Windows launcher |
+| `run_freegain.bat` | One-click Windows launcher when running from source |
+| `packaging/` | PyInstaller spec, Windows build script, icon, download read-me |
 
 ## Performance
 

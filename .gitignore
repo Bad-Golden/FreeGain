@@ -7,3 +7,6 @@ venv/
 Thumbs.db
 local_config.json
 .pytest_cache/
+.build-venv/
+build/
+dist/

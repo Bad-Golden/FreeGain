@@ -1,0 +1,67 @@
+name: build
+
+# Builds the standalone downloads on every push (grab them from the run's
+# "Artifacts" section), and attaches them to a GitHub Release when a tag
+# like v1.0.0 is pushed.
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: FreeGain-Windows
+          - os: macos-latest
+            artifact: FreeGain-macOS
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt -r requirements-dev.txt pyinstaller
+      - run: python -m pytest -q
+      - run: pyinstaller --noconfirm --clean packaging/freegain.spec
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release | Out-Null
+          Copy-Item dist/FreeGain.exe, packaging/READ_ME_FIRST.txt, LICENSE release/
+          Compress-Archive -Path release/* -DestinationPath FreeGain-Windows.zip
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir release
+          cp -R dist/FreeGain.app release/
+          cp packaging/READ_ME_FIRST.txt LICENSE release/
+          (cd release && zip -qry ../FreeGain-macOS.zip .)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            FreeGain-Windows.zip
+            FreeGain-macOS.zip

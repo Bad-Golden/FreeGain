@@ -16,7 +16,9 @@ Run with: python freegain_app.py
 
 import json
 import math
+import os
 import queue
+import sys
 import tkinter as tk
 from pathlib import Path
 from tkinter import ttk, messagebox
@@ -25,7 +27,21 @@ from audio_engine import AudioEngine
 from consoles import (CONSOLE_PROFILES, DEFAULT_PROFILE, AudioOnlyDriver, brands,
                       create_driver, models_for_brand)
 
-CONFIG_PATH = Path(__file__).with_name("local_config.json")
+
+def _config_path() -> Path:
+    # The packaged .exe unpacks to a temporary folder on every launch, so
+    # settings saved next to __file__ would be lost; keep them per-user.
+    if getattr(sys, "frozen", False):
+        if sys.platform == "darwin":
+            base = Path.home() / "Library" / "Application Support" / "FreeGain"
+        else:
+            base = Path(os.environ.get("APPDATA") or Path.home()) / "FreeGain"
+        base.mkdir(parents=True, exist_ok=True)
+        return base / "local_config.json"
+    return Path(__file__).with_name("local_config.json")
+
+
+CONFIG_PATH = _config_path()
 
 BG = "#1c1b1a"
 PANEL = "#26241f"
@@ -135,6 +151,7 @@ class FreeGainApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("FreeGain")
+        self._set_window_icon()
         self.root.configure(bg=BG)
         self.root.geometry("840x600")
         self.root.minsize(780, 540)
@@ -158,6 +175,15 @@ class FreeGainApp:
         self._refresh_devices()
         self._start_audio(show_errors=False)
         self._schedule_ui_refresh()
+
+    def _set_window_icon(self):
+        if sys.platform != "win32":
+            return
+        base = Path(getattr(sys, "_MEIPASS", Path(__file__).parent / "packaging"))
+        try:
+            self.root.iconbitmap(default=str(base / "freegain.ico"))
+        except (tk.TclError, OSError):
+            pass  # cosmetic only
 
     # ---------- UI construction ----------
 

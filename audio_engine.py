@@ -12,6 +12,7 @@ mic and which carries the speaker feed. The stream is opened with just
 enough input channels to cover both selections.
 """
 
+import os
 import threading
 
 import numpy as np
@@ -23,6 +24,12 @@ from simple_gate import SimpleGate
 def _sd():
     # Imported lazily so the rest of the app (and the test suite) can load
     # on machines where the PortAudio library isn't installed.
+    #
+    # On Windows, sounddevice ships a second PortAudio build with ASIO
+    # support and only loads it when this variable is set. Most console USB
+    # drivers (XAir, X32, Wing, Qu, SQ...) and Dante Virtual Soundcard are
+    # ASIO, so turn it on unless the user has explicitly set it otherwise.
+    os.environ.setdefault("SD_ENABLE_ASIO", "1")
     import sounddevice
     return sounddevice
 
