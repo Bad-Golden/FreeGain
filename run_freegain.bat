@@ -8,6 +8,11 @@ cd /d "%~dp0"
 set "VENV_PY=.venv\Scripts\python.exe"
 set "MARKER=.venv\freegain-installed.txt"
 
+rem Double-clicking this file inside a zip in Explorer runs a lone copy
+rem from a temp folder, so the rest of FreeGain isn't next to it.
+if not exist "freegain_app.py" goto not_extracted
+if not exist "requirements.txt" goto not_extracted
+
 rem Setup is only finished once the marker exists, so a failed or
 rem interrupted install is retried on the next run instead of skipped.
 if exist "%MARKER%" goto run
@@ -62,6 +67,16 @@ goto suggest_exe
 :old_python
 echo This Python is too old -- FreeGain needs Python 3.10 or newer.
 goto suggest_exe
+
+:not_extracted
+echo FreeGain's files aren't next to this script. This usually means it
+echo was opened from inside a zip file.
+echo.
+echo Fix: close this window, right-click the zip, choose "Extract All...",
+echo then open the extracted folder and double-click run_freegain.bat.
+echo.
+pause
+exit /b 1
 
 :venv_failed
 echo Could not create a Python environment in this folder.
