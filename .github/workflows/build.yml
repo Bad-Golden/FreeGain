@@ -66,6 +66,44 @@ jobs:
           file dist/FreeGain.app/Contents/MacOS/FreeGain
           (cd release && zip -qry ../${{ matrix.artifact }}.zip .)
 
+      # Launch the app exactly as a user would get it: unzip the release zip
+      # and run the app inside it, then check it's still alive after a few
+      # seconds, grab a screenshot and any output. Launching from a script
+      # skips Gatekeeper's "unidentified developer" prompt, so this tests the
+      # app itself; the spctl line just records what Gatekeeper would say.
+      - name: Smoke test (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p smoke/unzipped
+          ditto -x -k ${{ matrix.artifact }}.zip smoke/unzipped
+          APP=smoke/unzipped/FreeGain.app
+          echo "== architecture";  file "$APP/Contents/MacOS/FreeGain" | tee smoke/report.txt
+          echo "== macOS";         sw_vers | tee -a smoke/report.txt
+          echo "== codesign";      (codesign --verify --deep --strict -v "$APP" 2>&1 || true) | tee -a smoke/report.txt
+          echo "== gatekeeper";    (spctl --assess --type execute -vv "$APP" 2>&1 || true) | tee -a smoke/report.txt
+          "$APP/Contents/MacOS/FreeGain" > smoke/app-output.txt 2>&1 &
+          PID=$!
+          sleep 20
+          screencapture -x smoke/screenshot.png || true
+          if kill -0 $PID 2>/dev/null; then
+            echo "RESULT: app still running after 20s" | tee -a smoke/report.txt
+            kill $PID
+          else
+            CODE=0; wait $PID || CODE=$?
+            echo "RESULT: app exited early with code $CODE" | tee -a smoke/report.txt
+            cat smoke/app-output.txt
+            exit 1
+          fi
+          cat smoke/app-output.txt
+
+      - name: Upload smoke test results (macOS)
+        if: always() && runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-${{ matrix.artifact }}
+          path: smoke/*.*
+          if-no-files-found: ignore
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
