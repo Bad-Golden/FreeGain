@@ -66,7 +66,10 @@ anyway**.
 or `FreeGain-macOS-Intel.zip` for Intel Macs. To check which one you have,
 open  → About This Mac: "Chip: Apple M…" means Apple Silicon, and
 "Processor: … Intel" means Intel. Unzip it and drag `FreeGain.app` to
-Applications. The first time, right-click it and choose **Open**.
+Applications. Needs macOS 11 (Big Sur) or newer. The app isn't notarized
+by Apple yet, so the first launch says Apple "could not verify" it: go to
+**System Settings → Privacy & Security** and click **Open Anyway**, or run
+`xattr -dr com.apple.quarantine /Applications/FreeGain.app` in Terminal.
 
 The downloads are built automatically by GitHub Actions
 (`.github/workflows/build.yml`). Every push produces them under the run's

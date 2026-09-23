@@ -30,7 +30,25 @@ jobs:
           python-version: "3.12"
       - run: pip install -r requirements.txt -r requirements-dev.txt pyinstaller
       - run: python -m pytest -q
+
+      # pip on a current macOS runner picks numpy's "macOS 14+" wheels, which
+      # makes an app that won't start on older Macs. Swap in numpy's
+      # compatibility wheel so the app runs on macOS 11 (Big Sur) and later.
+      - name: Use macOS 11-compatible numpy (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          pip download --only-binary=:all: --no-deps --python-version 3.12 \
+            --platform "macosx_11_0_$(uname -m)" -d compat-wheels numpy
+          pip install --force-reinstall --no-deps compat-wheels/numpy-*.whl
+          python -c "import numpy; print('numpy', numpy.__version__)"
+
       - run: pyinstaller --noconfirm --clean packaging/freegain.spec
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+
+      - name: Check the app runs on macOS 11+ (macOS)
+        if: runner.os == 'macOS'
+        run: python packaging/check_macos_min.py dist/FreeGain.app 11.0
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
