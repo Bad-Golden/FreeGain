@@ -1,5 +1,8 @@
 # FreeGain — feedback suppression for live consoles (Windows & Mac)
 
+📖 **Full documentation: see the [Wiki](../../wiki)** (setup guides for every
+console, troubleshooting, FAQ).
+
 FreeGain listens to a vocal mic and to the signal feeding your speakers.
 It learns the acoustic path between the two with an NLMS adaptive filter
 and subtracts the predicted feedback and room spill from the mic. A gate

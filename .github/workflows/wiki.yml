@@ -1,0 +1,56 @@
+name: wiki
+
+# Publishes the pages in wiki/ to this repository's GitHub wiki whenever
+# they change on main. Edit the wiki in wiki/, not on the website -- edits
+# made on the website are overwritten by the next publish.
+#
+# One-time setup: GitHub only creates a wiki's storage after its first page
+# exists. In the repository go to Settings -> Features -> tick "Wikis",
+# then open the Wiki tab, click "Create the first page" and "Save page".
+
+on:
+  push:
+    branches: [main]
+    paths: ["wiki/**", ".github/workflows/wiki.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: wiki
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone the wiki
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! git clone "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git" wiki-repo; then
+            echo "::error::The wiki isn't set up yet. Enable Wikis in Settings -> Features, then open the Wiki tab and create the first page (any content). After that, re-run this workflow."
+            exit 1
+          fi
+
+      - name: Copy pages
+        run: |
+          # Mirror wiki/ exactly: pages deleted here are deleted there too.
+          find wiki-repo -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp -R wiki/. wiki-repo/
+
+      - name: Publish
+        working-directory: wiki-repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Wiki already up to date."
+            exit 0
+          fi
+          git commit -m "Update wiki from ${GITHUB_SHA::7}"
+          git push
