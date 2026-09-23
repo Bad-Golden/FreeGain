@@ -18,8 +18,10 @@ jobs:
         include:
           - os: windows-latest
             artifact: FreeGain-Windows
-          - os: macos-latest
-            artifact: FreeGain-macOS
+          - os: macos-latest       # Apple Silicon (arm64)
+            artifact: FreeGain-macOS-AppleSilicon
+          - os: macos-15-intel     # Intel (x86_64)
+            artifact: FreeGain-macOS-Intel
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -43,7 +45,8 @@ jobs:
           mkdir release
           cp -R dist/FreeGain.app release/
           cp packaging/READ_ME_FIRST.txt LICENSE release/
-          (cd release && zip -qry ../FreeGain-macOS.zip .)
+          file dist/FreeGain.app/Contents/MacOS/FreeGain
+          (cd release && zip -qry ../${{ matrix.artifact }}.zip .)
 
       - uses: actions/upload-artifact@v4
         with:
@@ -64,4 +67,5 @@ jobs:
         with:
           files: |
             FreeGain-Windows.zip
-            FreeGain-macOS.zip
+            FreeGain-macOS-AppleSilicon.zip
+            FreeGain-macOS-Intel.zip

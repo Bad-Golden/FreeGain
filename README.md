@@ -62,8 +62,11 @@ or anything else to install. The app isn't code-signed yet, so the first
 launch may show "Windows protected your PC": click **More info → Run
 anyway**.
 
-**Mac:** download `FreeGain-macOS.zip`, unzip it and drag `FreeGain.app`
-to Applications. The first time, right-click it and choose **Open**.
+**Mac:** download `FreeGain-macOS-AppleSilicon.zip` for M1/M2/M3/M4 Macs,
+or `FreeGain-macOS-Intel.zip` for Intel Macs. To check which one you have,
+open  → About This Mac: "Chip: Apple M…" means Apple Silicon, and
+"Processor: … Intel" means Intel. Unzip it and drag `FreeGain.app` to
+Applications. The first time, right-click it and choose **Open**.
 
 The downloads are built automatically by GitHub Actions
 (`.github/workflows/build.yml`). Every push produces them under the run's
