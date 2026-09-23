@@ -2,64 +2,123 @@
 audio_engine.py
 
 Handles USB audio I/O via sounddevice (PortAudio) and runs each block
-through the NLMS filter + gate. Assumes input channel 0 = mic, channel 1
-= reference (speaker feed) -- same assumption as the JUCE version, and
-the same known gap: the UI's channel dropdowns don't yet reroute which
-physical channel is used here. See README.md.
+through the NLMS filter + gate.
+
+The mic and reference signals are picked by input channel index
+(0-based), so with an XAir/X32 USB interface exposing e.g. 18 inputs you
+can choose which USB channel carries the vocal mic and which carries the
+speaker feed. The stream is opened with just enough input channels to
+cover both selections.
 """
 
 import threading
 
 import numpy as np
-import sounddevice as sd
 
-from nlms_filter import NLMSFilter
+from nlms_filter import NLMSFilter, cancellation_depth_db
 from simple_gate import SimpleGate
 
 
+def _sd():
+    # Imported lazily so the rest of the app (and the test suite) can load
+    # on machines where the PortAudio library isn't installed.
+    import sounddevice
+    return sounddevice
+
+
 class AudioEngine:
-    def __init__(self, sample_rate: int = 44100, block_size: int = 512, num_taps: int = 256):
-        self.sample_rate = sample_rate
+    def __init__(self, sample_rate=None, block_size: int = 512, num_taps: int = 256):
+        # sample_rate=None means "use the device's native rate" -- XAir/X32
+        # USB interfaces usually run at 48 kHz, and forcing a different rate
+        # either fails to open or makes the OS resample behind our back.
+        self.requested_sample_rate = sample_rate
+        self.sample_rate = float(sample_rate or 48000)
         self.block_size = block_size
         self.filter = NLMSFilter(num_taps=num_taps, step_size=0.5)
-        self.gate = SimpleGate(sample_rate=sample_rate)
+        self.gate = SimpleGate(sample_rate=self.sample_rate)
         self.stream = None
         self.engaged = True
-        self._lock = threading.Lock()
+
+        self.mic_channel = 0
+        self.reference_channel = 1
+        self.input_device = None
+        self.output_device = None
+
+        # Set from the UI thread, acted on at the start of the next audio
+        # block -- so the filter is never reset halfway through processing.
+        self._reset_requested = threading.Event()
 
         # Latest metering info, read by the UI refresh loop.
         self.last_input_peak = 0.0
         self.last_output_peak = 0.0
         self.last_reference_peak = 0.0
         self.last_cancellation_depth_db = 0.0
+        self.xrun_count = 0
 
-    def list_devices(self):
-        return sd.query_devices()
+    # ---------- Device handling ----------
 
-    def start(self, device=None):
-        self.stream = sd.Stream(
-            device=device,
+    @staticmethod
+    def list_devices():
+        """Return [(index, name, max_input_channels, max_output_channels)]."""
+        devices = _sd().query_devices()
+        return [(i, d["name"], d["max_input_channels"], d["max_output_channels"])
+                for i, d in enumerate(devices)]
+
+    def configure(self, input_device=None, output_device=None,
+                  mic_channel: int = 0, reference_channel: int = 1):
+        """Set routing. Takes effect on the next start()."""
+        if mic_channel < 0 or reference_channel < 0:
+            raise ValueError("channel indices must be >= 0")
+        self.input_device = input_device
+        self.output_device = output_device
+        self.mic_channel = mic_channel
+        self.reference_channel = reference_channel
+
+    @property
+    def running(self) -> bool:
+        return self.stream is not None
+
+    def start(self):
+        sd = _sd()
+        self.stop()
+
+        in_channels = max(self.mic_channel, self.reference_channel) + 1
+        in_info = sd.query_devices(self.input_device, "input")
+        if in_info["max_input_channels"] < in_channels:
+            raise RuntimeError(
+                f"'{in_info['name']}' has {in_info['max_input_channels']} input "
+                f"channel(s), but channel {in_channels} was selected.")
+
+        rate = self.requested_sample_rate or in_info["default_samplerate"]
+        self.sample_rate = float(rate)
+        self.gate.set_sample_rate(self.sample_rate)
+        self.gate.reset()
+        self._reset_requested.set()  # new device = new room/latency, relearn
+
+        stream = sd.Stream(
+            device=(self.input_device, self.output_device),
             samplerate=self.sample_rate,
             blocksize=self.block_size,
-            channels=(2, 1),  # 2 in (mic, reference), 1 out
+            channels=(in_channels, 1),
             dtype="float32",
             callback=self._callback,
         )
-        self.stream.start()
+        stream.start()
+        self.stream = stream
 
     def stop(self):
-        if self.stream:
-            self.stream.stop()
-            self.stream.close()
-            self.stream = None
+        stream, self.stream = self.stream, None
+        if stream:
+            stream.stop()
+            stream.close()
+
+    # ---------- Controls (called from the UI thread) ----------
 
     def trigger_relearn(self):
-        with self._lock:
-            self.filter.reset()
+        self._reset_requested.set()
 
     def set_engaged(self, engaged: bool):
-        with self._lock:
-            self.engaged = engaged
+        self.engaged = engaged
 
     def set_gate_threshold_db(self, threshold_db: float):
         self.gate.set_threshold_db(threshold_db)
@@ -67,36 +126,47 @@ class AudioEngine:
     def set_gate_timing(self, attack_ms: float, release_ms: float):
         self.gate.set_timing(attack_ms, release_ms)
 
-    def _callback(self, indata, outdata, frames, time_info, status):
-        if status:
-            # Overflow/underflow warnings land here -- surfacing them to
-            # the UI (rather than just printing) is a reasonable next step.
-            print(f"[audio] {status}")
+    # ---------- Audio thread ----------
 
-        # Guard against a zero-length block, which some drivers can send
-        # transiently (device reconfiguration, stream start/stop). Caught
-        # via stress testing -- indexing [-1] below on an empty array
-        # crashed the whole callback before this check.
+    def _callback(self, indata, outdata, frames, time_info, status):
+        # Don't print from the audio thread -- console I/O can block long
+        # enough to cause the very dropouts being reported. Just count them.
+        if status:
+            self.xrun_count += 1
+
+        # Some drivers send zero-length blocks transiently (device
+        # reconfiguration, stream start/stop).
         if frames == 0:
             return
 
-        mic = indata[:, 0].astype(np.float64)
-        reference = indata[:, 1].astype(np.float64) if indata.shape[1] > 1 else mic
+        if self._reset_requested.is_set():
+            self._reset_requested.clear()
+            self.filter.reset()
 
-        with self._lock:
-            engaged = self.engaged
+        channels = indata.shape[1]
+        mic = indata[:, min(self.mic_channel, channels - 1)].astype(np.float64)
+        reference = indata[:, min(self.reference_channel, channels - 1)].astype(np.float64)
 
-        if engaged:
+        if self.engaged:
             residual = self.filter.process_block(reference, mic)
             out = self.gate.process_block(residual)
-            depth = self.filter.estimated_cancellation_depth_db(reference[-1], out[-1])
+            depth = cancellation_depth_db(mic, residual)
         else:
-            out = mic.copy()
+            out = np.nan_to_num(mic, nan=0.0, posinf=0.0, neginf=0.0)
             depth = 0.0
 
-        outdata[:, 0] = out.astype(np.float32)
+        outdata[:, 0] = np.clip(out, -1.0, 1.0).astype(np.float32)
+        if outdata.shape[1] > 1:
+            outdata[:, 1:] = outdata[:, :1]
 
-        self.last_input_peak = float(np.max(np.abs(mic))) if len(mic) else 0.0
-        self.last_output_peak = float(np.max(np.abs(out))) if len(out) else 0.0
-        self.last_reference_peak = float(np.max(np.abs(reference))) if len(reference) else 0.0
+        self.last_input_peak = _peak(mic)
+        self.last_output_peak = _peak(out)
+        self.last_reference_peak = _peak(reference)
         self.last_cancellation_depth_db = depth
+
+
+def _peak(block: np.ndarray) -> float:
+    if len(block) == 0:
+        return 0.0
+    peak = float(np.max(np.abs(block)))
+    return peak if np.isfinite(peak) else 0.0

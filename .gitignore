@@ -6,3 +6,4 @@ venv/
 .DS_Store
 Thumbs.db
 local_config.json
+.pytest_cache/
