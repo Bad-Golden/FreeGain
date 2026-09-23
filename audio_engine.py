@@ -1,14 +1,15 @@
 """
 audio_engine.py
 
-Handles USB audio I/O via sounddevice (PortAudio) and runs each block
+Handles audio I/O via sounddevice (PortAudio) and runs each block
 through the NLMS filter + gate.
 
-The mic and reference signals are picked by input channel index
-(0-based), so with an XAir/X32 USB interface exposing e.g. 18 inputs you
-can choose which USB channel carries the vocal mic and which carries the
-speaker feed. The stream is opened with just enough input channels to
-cover both selections.
+Works with any audio interface PortAudio can open -- a console's built-in
+USB interface, Dante Virtual Soundcard, an external interface fed from the
+console's direct outs, etc. The mic and reference signals are picked by
+input channel index (0-based), so you choose which input carries the vocal
+mic and which carries the speaker feed. The stream is opened with just
+enough input channels to cover both selections.
 """
 
 import threading
@@ -28,8 +29,8 @@ def _sd():
 
 class AudioEngine:
     def __init__(self, sample_rate=None, block_size: int = 512, num_taps: int = 256):
-        # sample_rate=None means "use the device's native rate" -- XAir/X32
-        # USB interfaces usually run at 48 kHz, and forcing a different rate
+        # sample_rate=None means "use the device's native rate" -- console
+        # interfaces usually run at 48 kHz, and forcing a different rate
         # either fails to open or makes the OS resample behind our back.
         self.requested_sample_rate = sample_rate
         self.sample_rate = float(sample_rate or 48000)
@@ -59,10 +60,18 @@ class AudioEngine:
 
     @staticmethod
     def list_devices():
-        """Return [(index, name, max_input_channels, max_output_channels)]."""
-        devices = _sd().query_devices()
-        return [(i, d["name"], d["max_input_channels"], d["max_output_channels"])
-                for i, d in enumerate(devices)]
+        """
+        Return [(index, name, host_api, max_input_channels, max_output_channels)].
+
+        The host API (ASIO, WASAPI, MME, Core Audio...) matters on Windows:
+        multichannel console interfaces usually only expose all their
+        channels through ASIO or WASAPI, while MME often shows just two.
+        """
+        sd = _sd()
+        apis = [api["name"] for api in sd.query_hostapis()]
+        return [(i, d["name"], apis[d["hostapi"]] if d["hostapi"] < len(apis) else "?",
+                 d["max_input_channels"], d["max_output_channels"])
+                for i, d in enumerate(sd.query_devices())]
 
     def configure(self, input_device=None, output_device=None,
                   mic_channel: int = 0, reference_channel: int = 1):

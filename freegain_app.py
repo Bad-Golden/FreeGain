@@ -4,10 +4,12 @@ freegain_app.py
 Main window: bypass toggle, relearn room, panic mute, audio device and
 mic/reference channel pickers (named live from the mixer over OSC), gate
 threshold/attack/release sliders, input/output/cancellation-depth meters,
-and an OSC connect field with XAir/X32 console picker.
+and a console picker (brand + model) for remote control of the mixer.
 
-Settings (mixer IP, console type, devices, channels, gate) are saved to
-local_config.json next to this file on exit.
+Settings (mixer IP, console model, devices, channels, gate) are saved to
+local_config.json next to this file on exit. Per-console protocol tweaks
+(e.g. a non-default MIDI channel, or OSC addresses for "Generic OSC") go
+in that file's "console_options" section -- see README.md.
 
 Run with: python freegain_app.py
 """
@@ -20,8 +22,8 @@ from pathlib import Path
 from tkinter import ttk, messagebox
 
 from audio_engine import AudioEngine
-from console_profiles import CONSOLE_PROFILES, DEFAULT_PROFILE
-from mixer_osc_client import MixerOSCClient
+from consoles import (CONSOLE_PROFILES, DEFAULT_PROFILE, AudioOnlyDriver, brands,
+                      create_driver, models_for_brand)
 
 CONFIG_PATH = Path(__file__).with_name("local_config.json")
 
@@ -40,10 +42,11 @@ FONT_BIG = ("Segoe UI", 10)
 METER_FLOOR_DB = -60.0
 ACTIVITY_THRESHOLD = 0.01  # ~ -40 dBFS
 DEFAULT_DEVICE_LABEL = "System default"
-MAX_USB_CHANNELS = 32
+MAX_USB_CHANNELS = 64
 
 DEFAULT_CONFIG = {
     "console_type": DEFAULT_PROFILE,
+    "console_options": {},
     "mixer_ip": "192.168.1.10",
     "input_device": None,
     "output_device": None,
@@ -63,8 +66,13 @@ def load_config() -> dict:
             config.update({k: v for k, v in saved.items() if k in DEFAULT_CONFIG})
     except (OSError, ValueError):
         pass
+    # Key used by earlier versions, before per-model profiles existed.
+    config["console_type"] = {"xair": "xr18"}.get(config["console_type"],
+                                                  config["console_type"])
     if config["console_type"] not in CONSOLE_PROFILES:
         config["console_type"] = DEFAULT_PROFILE
+    if not isinstance(config["console_options"], dict):
+        config["console_options"] = {}
     return config
 
 
@@ -133,13 +141,14 @@ class FreeGainApp:
 
         self.config = load_config()
         self.engine = AudioEngine()
-        self.osc = MixerOSCClient(console_type=self.config["console_type"])
+        self.console = AudioOnlyDriver(CONSOLE_PROFILES["audio_only"])
         self.engaged = True
         self.panic_active = False
+        self.panic_target = None  # ("group", n) or ("channel", n) while muted
 
-        # OSC callbacks run on the OSC receive thread; tkinter isn't
+        # Console callbacks run on the driver's thread; tkinter isn't
         # thread-safe, so they only enqueue and the UI loop drains this.
-        self.osc_events: "queue.Queue[tuple]" = queue.Queue()
+        self.console_events: "queue.Queue[tuple]" = queue.Queue()
         self.channel_names: dict = {}
         # [(device_index_or_None, label)], parallel to the device comboboxes.
         self._input_choices = [(None, DEFAULT_DEVICE_LABEL)]
@@ -173,24 +182,32 @@ class FreeGainApp:
         top = tk.Frame(self.root, bg=BG)
         top.pack(fill="x", padx=16, pady=(16, 4))
 
-        keys = list(CONSOLE_PROFILES)
-        self.console_box = ttk.Combobox(
-            top, values=[CONSOLE_PROFILES[k]["label"] for k in keys],
-            state="readonly", width=30)
-        self.console_box.current(keys.index(self.config["console_type"]))
-        self.console_box.pack(side="left", padx=(0, 6))
+        tk.Label(top, text="Console", bg=BG, fg=TEXT_LO, font=FONT).pack(side="left")
+        self.brand_box = ttk.Combobox(top, values=brands(), state="readonly", width=22)
+        self.brand_box.pack(side="left", padx=(6, 6))
+        self.brand_box.bind("<<ComboboxSelected>>", lambda _e: self._on_brand_changed())
+        self.model_box = ttk.Combobox(top, state="readonly", width=34)
+        self.model_box.pack(side="left", padx=(0, 6))
+        self.model_box.bind("<<ComboboxSelected>>", lambda _e: self._on_model_changed())
+        self.console_note = tk.Label(top, text="", bg=BG, fg=TEXT_LO, font=FONT)
+        self.console_note.pack(side="left")
 
+        top = tk.Frame(self.root, bg=BG)
+        top.pack(fill="x", padx=16, pady=(4, 0))
+        tk.Label(top, text="Mixer IP", bg=BG, fg=TEXT_LO, font=FONT).pack(side="left")
         self.ip_entry = tk.Entry(top, bg=PANEL, fg=TEXT_HI, insertbackground=TEXT_HI,
                                  relief="flat", width=16)
         self.ip_entry.insert(0, self.config["mixer_ip"])
-        self.ip_entry.pack(side="left", padx=(0, 6), ipady=3)
+        self.ip_entry.pack(side="left", padx=(6, 6), ipady=3)
         self.ip_entry.bind("<Return>", lambda _e: self._on_connect())
 
-        self._button(top, "Connect", self._on_connect).pack(side="left")
+        self.connect_btn = self._button(top, "Connect", self._on_connect)
+        self.connect_btn.pack(side="left")
 
-        self.connection_label = tk.Label(top, text="OSC: not connected", bg=BG, fg=TEXT_LO,
+        self.connection_label = tk.Label(top, text="Not connected", bg=BG, fg=TEXT_LO,
                                          font=FONT_BIG)
         self.connection_label.pack(side="left", padx=(12, 0))
+        self._select_console(self.config["console_type"])
 
         self._build_audio_row()
 
@@ -254,9 +271,9 @@ class FreeGainApp:
         tk.Button(parent, text="Relearn room", command=self._on_relearn, bg=BG, fg=TEXT_HI,
                   relief="flat", activebackground=LINE).pack(fill="x", padx=12, pady=(20, 6))
 
-        self.panic_btn = tk.Button(parent, text="Panic mute (mute group 1)",
+        self.panic_btn = tk.Button(parent, text="Panic mute",
                                    command=self._on_panic, bg=PANIC_BG, fg=RED,
-                                   relief="flat", activebackground=RED)
+                                   relief="flat", activebackground=RED, wraplength=180)
         self.panic_btn.pack(fill="x", padx=12, pady=6)
 
     def _build_main(self, parent):
@@ -330,9 +347,9 @@ class FreeGainApp:
             return
 
         inputs = [(None, DEFAULT_DEVICE_LABEL)] + [
-            (i, f"{i}: {name} ({ins} in)") for i, name, ins, _outs in devices if ins > 0]
+            (i, f"{name} [{api}] ({ins} in)") for i, name, api, ins, _outs in devices if ins > 0]
         outputs = [(None, DEFAULT_DEVICE_LABEL)] + [
-            (i, f"{i}: {name} ({outs} out)") for i, name, _ins, outs in devices if outs > 0]
+            (i, f"{name} [{api}] ({outs} out)") for i, name, api, _ins, outs in devices if outs > 0]
         self._input_choices, self._output_choices = inputs, outputs
         self.input_box.configure(values=[label for _i, label in inputs])
         self.output_box.configure(values=[label for _i, label in outputs])
@@ -367,7 +384,7 @@ class FreeGainApp:
                                  "pick different channels for the filter to work.")
             else:
                 self._set_status(f"Audio running at {self.engine.sample_rate:.0f} Hz, "
-                                 f"mic = USB {mic + 1}, reference = USB {ref + 1}")
+                                 f"mic = input {mic + 1}, reference = input {ref + 1}")
         except Exception as exc:  # sounddevice raises PortAudioError/ValueError/...
             self.engine.stop()
             self._set_status(f"Audio not running: {exc}")
@@ -375,42 +392,75 @@ class FreeGainApp:
                 messagebox.showwarning(
                     "Audio device",
                     f"Couldn't start audio:\n{exc}\n\n"
-                    "Pick your mixer's USB audio device in the 'Audio in' box "
+                    "Pick your console's audio interface in the 'Audio in' box "
                     "and make sure the selected channels exist on it.")
 
     def _on_channels_changed(self):
         self._start_audio(show_errors=True)
 
-    # ---------- OSC ----------
+    # ---------- Console (remote control) ----------
+
+    def _selected_console_key(self) -> str:
+        keys = models_for_brand(self.brand_box.get())
+        pos = self.model_box.current()
+        return keys[pos] if 0 <= pos < len(keys) else "audio_only"
+
+    def _select_console(self, key: str):
+        brand = CONSOLE_PROFILES[key]["brand"]
+        self.brand_box.current(brands().index(brand))
+        self._fill_models(brand)
+        self.model_box.current(models_for_brand(brand).index(key))
+        self._on_model_changed()
+
+    def _fill_models(self, brand: str):
+        self.model_box.configure(
+            values=[CONSOLE_PROFILES[k]["label"] for k in models_for_brand(brand)])
+
+    def _on_brand_changed(self):
+        self._fill_models(self.brand_box.get())
+        self.model_box.current(0)
+        self._on_model_changed()
+
+    def _on_model_changed(self):
+        profile = CONSOLE_PROFILES[self._selected_console_key()]
+        needs_network = profile["driver"] != "none"
+        state = "normal" if needs_network else "disabled"
+        self.ip_entry.config(state=state)
+        self.connect_btn.config(state=state)
+        self.console_note.config(
+            text="experimental" if profile["status"] == "experimental" else "",
+            fg=AMBER)
 
     def _on_connect(self):
         ip = self.ip_entry.get().strip()
-        console_key = list(CONSOLE_PROFILES)[self.console_box.current()]
+        console_key = self._selected_console_key()
 
-        # Console type sets port/channel count, so reconnect with a fresh client.
-        self.osc.disconnect()
-        self.osc = MixerOSCClient(console_type=console_key)
-        self.osc.on_channel_name = lambda ch, name: self.osc_events.put(("name", ch, name))
+        self.console.disconnect()
+        options = self.config["console_options"].get(console_key, {})
+        self.console = create_driver(console_key, options)
+        self.console.on_channel_name = (
+            lambda ch, name: self.console_events.put(("name", ch, name)))
         self.channel_names.clear()
         self._populate_channel_lists(MAX_USB_CHANNELS)
 
-        # Fresh client = mixer's actual mute state is unknown to us;
+        # New connection = the mixer's actual mute state is unknown to us;
         # don't show a stale "muted" indicator from a previous session.
-        self._set_panic_state(False)
+        self._set_panic_state(None)
 
-        if not self.osc.connect(ip):
-            self.connection_label.config(text="OSC: invalid IP or network error", fg=RED)
+        if not self.console.connect(ip):
+            self.connection_label.config(
+                text="Invalid IP, network error or missing package (see console)", fg=RED)
             return
 
         self.config.update(console_type=console_key, mixer_ip=ip)
-        self.connection_label.config(text=f"OSC: waiting for {ip}…", fg=TEXT_LO)
-        self.osc.request_all_channel_names()
+        self.connection_label.config(text=f"Waiting for {ip}\u2026", fg=TEXT_LO)
+        self.console.request_all_channel_names()
 
-    def _drain_osc_events(self):
+    def _drain_console_events(self):
         changed = False
         try:
             while True:
-                kind, *payload = self.osc_events.get_nowait()
+                kind, *payload = self.console_events.get_nowait()
                 if kind == "name":
                     channel, name = payload
                     self.channel_names[channel] = name
@@ -421,12 +471,12 @@ class FreeGainApp:
             self._populate_channel_lists(MAX_USB_CHANNELS)
 
     def _populate_channel_lists(self, count: int):
-        # Assumes the mixer's default USB routing (mixer channel N -> USB
-        # input N), so live channel names are shown against USB inputs.
+        # Assumes the console's default routing (console channel N -> USB /
+        # interface input N), so live channel names are shown against inputs.
         values = []
         for ch in range(1, count + 1):
             name = self.channel_names.get(ch)
-            values.append(f"USB {ch} – {name}" if name else f"USB {ch}")
+            values.append(f"Input {ch} \u2013 {name}" if name else f"Input {ch}")
         for box in (self.vocal_box, self.reference_box):
             current = box.current()
             box.configure(values=values)
@@ -434,13 +484,13 @@ class FreeGainApp:
                 box.current(current)
 
     def _update_connection_label(self):
-        if not self.osc.connected:
+        console = self.console
+        if not console.connected:
             return
-        ip = self.osc.mixer_addr[0]
-        if self.osc.is_responding():
-            self.connection_label.config(text=f"OSC: connected to {ip}", fg=TEAL)
-        elif self.osc.last_reply_time:
-            self.connection_label.config(text=f"OSC: {ip} stopped responding", fg=RED)
+        if console.is_responding():
+            self.connection_label.config(text=f"Connected to {console.host}", fg=TEAL)
+        elif console.last_reply_time:
+            self.connection_label.config(text=f"{console.host} stopped responding", fg=RED)
 
     # ---------- Actions ----------
 
@@ -456,24 +506,44 @@ class FreeGainApp:
     def _on_relearn(self):
         self.engine.trigger_relearn()
 
-    def _on_panic(self):
-        # Persistent toggle: stays lit while the mute is active.
-        if not self.osc.connected:
-            messagebox.showinfo("Panic mute", "Connect to the mixer first -- "
-                                "panic mute works through OSC mute group 1.")
-            return
-        target = not self.panic_active
-        if self.osc.set_mute_group(1, target):
-            self._set_panic_state(target)
-        else:
-            self._set_status("Panic mute: couldn't send to mixer (network error)")
+    def _panic_target(self):
+        """Mute group 1 where the console has them, else the vocal channel."""
+        if self.console.supports_mute_groups:
+            return ("group", 1)
+        if self.console.supports_channel_mute:
+            return ("channel", max(self.vocal_box.current(), 0) + 1)
+        return None
 
-    def _set_panic_state(self, active: bool):
-        self.panic_active = active
-        if active:
-            self.panic_btn.config(bg=RED, fg=BG, text="MUTED (click to unmute)")
+    def _on_panic(self):
+        # Persistent toggle: stays lit while the mute is active, and unmutes
+        # exactly what it muted even if the vocal channel changed meanwhile.
+        if not self.console.connected:
+            messagebox.showinfo("Panic mute", "Connect to the mixer first -- "
+                                "panic mute works through the console's remote control.")
+            return
+        target = self.panic_target or self._panic_target()
+        if target is None:
+            messagebox.showinfo("Panic mute", "This console's driver can't mute remotely.")
+            return
+        mute = self.panic_target is None
+        kind, number = target
+        if kind == "group":
+            sent = self.console.set_mute_group(number, mute)
         else:
-            self.panic_btn.config(bg=PANIC_BG, fg=RED, text="Panic mute (mute group 1)")
+            sent = self.console.set_channel_mute(number, mute)
+        if sent:
+            self._set_panic_state(target if mute else None)
+        else:
+            self._set_status("Panic mute: couldn't send to the console (not connected yet?)")
+
+    def _set_panic_state(self, target):
+        self.panic_target = target
+        self.panic_active = target is not None
+        if target:
+            what = "mute group" if target[0] == "group" else "channel"
+            self.panic_btn.config(bg=RED, fg=BG, text=f"MUTED {what} {target[1]} (click to unmute)")
+        else:
+            self.panic_btn.config(bg=PANIC_BG, fg=RED, text="Panic mute")
 
     def _on_gate_change(self):
         self.engine.set_gate_threshold_db(self.threshold_var.get())
@@ -485,7 +555,7 @@ class FreeGainApp:
     # ---------- Periodic updates ----------
 
     def _schedule_ui_refresh(self):
-        self._drain_osc_events()
+        self._drain_console_events()
         self._update_connection_label()
 
         engine = self.engine
@@ -508,7 +578,7 @@ class FreeGainApp:
         )
         save_config(self.config)
         self.engine.stop()
-        self.osc.disconnect()
+        self.console.disconnect()
         self.root.destroy()
 
 
