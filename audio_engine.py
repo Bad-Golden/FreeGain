@@ -31,6 +31,8 @@ import numpy as np
 
 from delay_estimator import DelayEstimator
 from fdaf_filter import PartitionedFDAF
+from freq_shift import FrequencyShifter
+from pem_filter import PEMFDAF
 from nlms_filter import cancellation_depth_db
 from simple_gate import SimpleGate
 
@@ -43,6 +45,18 @@ MAX_BULK_DELAY_MS = 500.0
 DELAY_MARGIN_MS = 5.0        # start the filter this much before the direct sound
 DELAY_CHANGE_MS = 2.0        # ignore estimate changes smaller than this
 FILTER_BLOCK = 256
+
+# Feedback mode: the processed vocal goes back out of the PA, so the loop is
+# closed. Uses the prediction-error-method filter (learns the room, not the
+# singer), a small frequency shift on the output to decorrelate the loop,
+# and slower learning. Measured in tests/stress_feedback_loop.py: about
+# +6 dB of extra usable gain before feedback with pitched singing, with the
+# voice as clean as bypass at normal gain.
+FEEDBACK_SHIFT_HZ = 5.0
+FEEDBACK_STEP = 0.1
+# Spill mode (feedback mode off): the reference never contains the vocal,
+# e.g. a band or playback bleeding into a mic. The plain filter learns fast.
+SPILL_STEP = 0.5
 
 
 def _sd():
@@ -60,7 +74,7 @@ def _sd():
 
 class AudioEngine:
     def __init__(self, sample_rate=None, block_size: int = 512,
-                 tail_ms: float = DEFAULT_TAIL_MS):
+                 tail_ms: float = DEFAULT_TAIL_MS, feedback_mode: bool = True):
         # sample_rate=None means "use the device's native rate" -- console
         # interfaces usually run at 48 kHz, and forcing a different rate
         # either fails to open or makes the OS resample behind our back.
@@ -68,12 +82,17 @@ class AudioEngine:
         self.sample_rate = float(sample_rate or 48000)
         self.block_size = block_size
         self.tail_ms = float(tail_ms)
+        self.feedback_mode = bool(feedback_mode)
         self.filter = self._make_filter()
         self.gate = SimpleGate(sample_rate=self.sample_rate)
         self.delay_estimator = DelayEstimator(self.sample_rate, MAX_BULK_DELAY_MS)
         self.stream = None
         self.engaged = True
         self.auto_delay = True
+        # Output frequency shift (Hz) against closed-loop feedback; 0 = off.
+        self.shift_hz = 0.0
+        self.shifter = None
+        self._pending_shift = FEEDBACK_SHIFT_HZ if self.feedback_mode else None
 
         self.mic_channel = 0
         self.reference_channel = 1
@@ -181,6 +200,8 @@ class AudioEngine:
         self._max_delay = int(MAX_BULK_DELAY_MS / 1000 * self.sample_rate)
         self._ref_history = np.zeros(self._max_delay)
         self.bulk_delay = 0
+        if self.shift_hz:
+            self.shifter = FrequencyShifter(self.shift_hz, self.sample_rate, self.block_size)
 
     # ---------- Controls (called from the UI thread) ----------
 
@@ -202,6 +223,17 @@ class AudioEngine:
         self.tail_ms = float(tail_ms)
         self._pending_filter = self._make_filter()
 
+    def set_feedback_mode(self, enabled: bool):
+        """Switch between feedback mode (closed loop) and spill mode. Keeps
+        what the filter has learned; applied next block."""
+        self.feedback_mode = bool(enabled)
+        self._pending_filter = self._make_filter()
+        self._pending_shift = FEEDBACK_SHIFT_HZ if enabled else 0.0
+
+    def set_frequency_shift(self, hz: float):
+        """Shift FreeGain's output up by `hz` (0 = off). Applied next block."""
+        self._pending_shift = max(0.0, float(hz))
+
     def set_gate_threshold_db(self, threshold_db: float):
         self.gate.set_threshold_db(threshold_db)
 
@@ -214,7 +246,11 @@ class AudioEngine:
 
     def _make_filter(self) -> PartitionedFDAF:
         taps = int(self.tail_ms / 1000.0 * self.sample_rate)
-        return PartitionedFDAF(filter_length=taps, block_size=FILTER_BLOCK)
+        if self.feedback_mode:
+            return PEMFDAF(filter_length=taps, block_size=FILTER_BLOCK,
+                           step_size=FEEDBACK_STEP, sample_rate=self.sample_rate)
+        return PartitionedFDAF(filter_length=taps, block_size=FILTER_BLOCK,
+                               step_size=SPILL_STEP)
 
     # ---------- Audio thread ----------
 
@@ -247,6 +283,8 @@ class AudioEngine:
         if self.engaged:
             residual = self.filter.process(delayed_ref, mic)
             out = self.gate.process_block(residual)
+            if self.shifter is not None:
+                out = self.shifter.process(out)
             depth = cancellation_depth_db(mic, residual)
         else:
             out = mic
@@ -272,6 +310,15 @@ class AudioEngine:
             self._reset_requested.clear()
             self.filter.reset()
             self.gate.reset()
+        if self._pending_shift is not None:
+            hz, self._pending_shift = self._pending_shift, None
+            self.shift_hz = hz
+            if hz == 0.0:
+                self.shifter = None
+            elif self.shifter is None:
+                self.shifter = FrequencyShifter(hz, self.sample_rate, self.block_size)
+            else:
+                self.shifter.set_shift(hz)
 
         if self.auto_delay:
             measured = self.delay_estimator.delay_samples
@@ -324,6 +371,9 @@ class AudioEngine:
             "reference_channel": self.reference_channel + 1,
             "engaged": self.engaged,
             "tail_ms": self.tail_ms,
+            "feedback_mode": self.feedback_mode,
+            "frequency_shift_hz": self.shift_hz,
+            "safety_bypassed_blocks": self.filter.bypassed_blocks,
             "filter_taps": self.filter.filter_length,
             "filter_resets": self.filter.resets,
             "auto_delay": self.auto_delay,

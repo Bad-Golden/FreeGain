@@ -66,7 +66,7 @@ def test_cancels_a_realistic_room_with_auto_delay():
     """Speaker 3 m away (9 ms) plus 60 ms of reverb: the old 5 ms filter got 0 dB."""
     x = music(8)
     d = echo(x, room(delay_ms=9, tail_ms=60))
-    engine = AudioEngine(sample_rate=FS)
+    engine = AudioEngine(sample_rate=FS, feedback_mode=False)
     half = len(x) // 2
     run_signal(engine, d[:half], x[:half])
     engine.delay_estimator.estimate_once()
@@ -82,7 +82,7 @@ def test_long_speaker_delay_is_compensated():
     own 85 ms window; the bulk delay has to bring it into range."""
     x = music(8, seed=4)
     d = echo(x, room(delay_ms=120, tail_ms=40, seed=4))
-    engine = AudioEngine(sample_rate=FS)
+    engine = AudioEngine(sample_rate=FS, feedback_mode=False)
     half = len(x) // 2
     run_signal(engine, d[:half], x[:half])
     engine.delay_estimator.estimate_once()
@@ -90,7 +90,7 @@ def test_long_speaker_delay_is_compensated():
     out = run_signal(engine, d[half:], x[half:])
     assert depth_db(d[-FS:], out[-FS:]) > 25
 
-    manual = AudioEngine(sample_rate=FS)
+    manual = AudioEngine(sample_rate=FS, feedback_mode=False)
     manual.set_auto_delay(False)
     out = run_signal(manual, d, x)
     assert depth_db(d[-FS:], out[-FS:]) < 3  # without it: nothing
@@ -159,3 +159,32 @@ def test_ui_thread_changes_while_audio_runs():
         t.join()
     assert not errors
     assert np.all(np.isfinite(out))
+
+
+def test_feedback_mode_is_default_and_toggles_without_losing_learning():
+    from fdaf_filter import PartitionedFDAF
+    from pem_filter import PEMFDAF
+    engine = AudioEngine(sample_rate=FS)
+    assert engine.feedback_mode and isinstance(engine.filter, PEMFDAF)
+    run_block(engine, np.zeros((512, 2)))
+    assert engine.shifter is not None and engine.shift_hz == 5.0
+    x = music(4)
+    run_signal(engine, echo(x, room(3, 20)), x)
+    learned = engine.filter.W.copy()
+    engine.set_feedback_mode(False)
+    run_block(engine, np.zeros((512, 2)))
+    assert type(engine.filter) is PartitionedFDAF and engine.shifter is None
+    assert np.allclose(engine.filter.W, learned)
+    engine.set_feedback_mode(True)
+    run_block(engine, np.zeros((512, 2)))
+    assert isinstance(engine.filter, PEMFDAF) and engine.shifter is not None
+
+
+def test_feedback_mode_still_cancels_spill():
+    """Feedback mode learns more carefully, but plain echo still goes."""
+    x = music(10, seed=6)
+    d = echo(x, room(3, 30, seed=6))
+    engine = AudioEngine(sample_rate=FS)
+    engine.set_gate_threshold_db(-120)
+    out = run_signal(engine, d, x)
+    assert depth_db(d[-FS:], out[-FS:]) > 20

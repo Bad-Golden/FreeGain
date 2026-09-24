@@ -40,3 +40,30 @@ def echo(reference: np.ndarray, h: np.ndarray) -> np.ndarray:
 
 def depth_db(before: np.ndarray, after: np.ndarray) -> float:
     return 10 * np.log10((np.mean(before ** 2) + 1e-20) / (np.mean(after ** 2) + 1e-20))
+
+
+def singing(seconds: float, seed: int = 1, fs: int = FS, level: float = 0.1) -> np.ndarray:
+    """A sung melody: pitched harmonics with vibrato, note changes, vowel-like
+    resonances and phrasing. Much harder for a feedback canceller than noisy
+    speech, because a pitched voice repeats itself every period."""
+    rng = np.random.default_rng(seed)
+    n = int(seconds * fs)
+    t = np.arange(n) / fs
+    # A new note every ~0.5 s, somewhere in a comfortable singing range.
+    note_len = int(0.5 * fs)
+    notes = 150 * 2 ** (rng.integers(0, 12, n // note_len + 1) / 12)
+    f0 = np.repeat(notes, note_len)[:n]
+    f0 = np.convolve(f0, np.ones(2000) / 2000, mode="same")          # glide between notes
+    f0 *= 1 + 0.01 * np.sin(2 * np.pi * 5.5 * t)                      # vibrato
+    phase = 2 * np.pi * np.cumsum(f0) / fs
+    voice = sum((0.7 ** k) * np.sin(k * phase) for k in range(1, 16))
+    # Vowel resonances: a couple of fixed formant-ish peaks.
+    spectrum = np.fft.rfft(voice)
+    freqs = np.fft.rfftfreq(n, 1 / fs)
+    shape = 1 + 3 * np.exp(-((freqs - 700) / 250) ** 2) + 2 * np.exp(-((freqs - 1200) / 300) ** 2)
+    voice = np.fft.irfft(spectrum * shape, n)
+    # Phrasing: sing for ~3 s, breathe for ~0.7 s.
+    envelope = (np.sin(2 * np.pi * t / 3.7) > -0.6).astype(float)
+    envelope = np.convolve(envelope, np.ones(1500) / 1500, mode="same")
+    voice *= envelope
+    return level * voice / (np.sqrt(np.mean(voice ** 2)) + 1e-12)

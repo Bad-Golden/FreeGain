@@ -6,7 +6,10 @@ console, troubleshooting, FAQ).
 FreeGain listens to a vocal mic and to the signal feeding your speakers.
 It measures how late the speaker sound reaches the mic, learns the room's
 echo with a frequency-domain adaptive filter (up to 340 ms of reverb), and
-subtracts the predicted feedback and room spill from the mic. A gate
+subtracts the predicted feedback and room spill from the mic. In a
+simulated closed loop with realistic singing it gives **6–9 dB more usable
+gain before feedback** than bypass, with the voice as clean as bypass at
+normal levels. It hasn't been confirmed on a real PA yet. A gate
 follows the filter. For many consoles the app can also talk to the desk
 over the network, to show channel names and to give you a panic mute.
 
@@ -129,21 +132,27 @@ python3 -m venv .venv
    The label turns green ("connected") once the console actually answers.
    On consoles that support it, channel names then appear in the input
    pickers.
-6. **Room echo tail** sets how much reverb the filter models: 40 ms (small
+6. **Vocal goes back to the PA (feedback mode)**, on by default. Use it
+   whenever FreeGain's output is in the PA or monitors, which is the normal
+   case for fighting feedback. It learns the room without learning the
+   singer, and shifts the output up by 5 Hz to keep the loop stable. Turn it
+   off only when the reference never contains this vocal (e.g. cancelling a
+   band's spill into a podium mic); the filter then learns faster.
+7. **Room echo tail** sets how much reverb the filter models: 40 ms (small
    room), 85 ms (typical, the default), 170 ms (large hall) or 340 ms (very
    live). Longer cancels more in reverberant rooms but takes longer to learn.
    Changing it keeps what has already been learned.
    **Find speaker delay automatically** measures how late the speaker sound
    reaches the mic (it needs music playing) and shows it under the checkbox.
-7. **Relearn room** clears what the filter has learned and re-measures the
+8. **Relearn room** clears what the filter has learned and re-measures the
    delay. Use it after moving mics or speakers.
-8. **Panic mute** stays lit while the mute is active. On consoles with mute
+9. **Panic mute** stays lit while the mute is active. On consoles with mute
    groups it toggles mute group 1, so assign the channels you want silenced
    to that group. On other consoles it mutes the selected vocal channel,
    assuming console channel N comes in as input N.
-9. **Active / Bypassed** switches processing off and passes the mic through
+10. **Active / Bypassed** switches processing off and passes the mic through
    untouched.
-10. **Save diagnostics…** (bottom right) writes a JSON report of the session:
+11. **Save diagnostics…** (bottom right) writes a JSON report of the session:
     settings, devices, measured delay, CPU load, dropouts, and a per-second
     history of cancellation depth and levels. Send it along with test reports.
 
@@ -189,6 +198,8 @@ zero-padded numbers. The `*_values` pairs are `[unmuted, muted]`.
 | `audio_engine.py` | Audio I/O (`sounddevice`) and channel routing; runs the filter and gate |
 | `fdaf_filter.py` | The echo canceller: partitioned-block frequency-domain adaptive filter |
 | `delay_estimator.py` | Measures the speaker-to-mic delay (GCC-PHAT) on a background thread |
+| `pem_filter.py` | Feedback-mode canceller: pre-whitened (prediction error method) so it learns the room, not the singer |
+| `freq_shift.py` | Low-latency 5 Hz frequency shifter used in feedback mode |
 | `diagnostics.py` | Builds the "Save diagnostics" report |
 | `nlms_filter.py` | Original sample-by-sample NLMS filter (kept for reference) and the cancellation-depth helper |
 | `simple_gate.py` | Envelope gate/expander |
@@ -210,14 +221,19 @@ longest echo tail uses little CPU. Check your headroom with:
 python benchmark.py
 ```
 
-On the development machine (filter plus gate, 48 kHz):
+On the development machine (whole chain, 48 kHz, 512-sample blocks):
 
-| Echo tail | Taps | Speed | CPU |
+| Echo tail | Taps | Feedback mode (default) | Spill mode |
 | --- | --- | --- | --- |
-| 40 ms | 2048 | 21× real time | ~5% |
-| 85 ms | 4096 | 17× real time | ~6% |
-| 170 ms | 8192 | 14× real time | ~7% |
-| 340 ms | 16384 | 9× real time | ~11% |
+| 40 ms | 2048 | ~10% CPU | ~4% CPU |
+| 85 ms | 4096 | ~10% CPU | ~5% CPU |
+| 170 ms | 8192 | ~13% CPU | ~7% CPU |
+| 340 ms | 16384 | ~18% CPU | ~11% CPU |
+
+Feedback mode costs more because it also models the voice (pre-whitening)
+and runs the frequency shifter. The 340 ms tail in feedback mode is the
+heaviest setting and learns slowest; prefer 85 or 170 ms unless the room
+really needs it.
 
 The app shows live CPU load next to "Cancellation depth". If the dropout
 counter keeps rising, pick a shorter echo tail.
@@ -254,6 +270,15 @@ The suite covers:
   when no console is present, garbage data, malformed meter blobs.
 
 GitHub Actions runs the suite on Windows and Linux for every push.
+
+The **closed-loop test** simulates the real use case: a singer into a mic,
+FreeGain's output going to the PA, and the PA going back into the mic. It
+measures how much more gain you get before feedback, with voice quality
+checked too:
+
+```
+python tests/stress_feedback_loop.py
+```
 
 There's also a long **soak test** that plays a simulated gig through the real
 audio engine: music at changing levels, a singer coming and going, the mic

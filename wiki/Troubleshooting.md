@@ -65,6 +65,12 @@ see all channels, or install the console's driver (see [[Audio Setup]]).
   effects.
 - Press **Save diagnostics…** and send the file.
 
+**The voice sounds warbly, thin or phasey**
+- Make sure **Vocal goes back to the PA (feedback mode)** is ticked if
+  FreeGain's output reaches the PA or monitors. Without it, the filter can
+  learn to cancel sustained sung notes.
+- Press **Relearn room** after big changes.
+
 **Dropouts counter keeps climbing / crackles**
 The computer can't keep up. Close other programs, use ASIO on Windows, or
 run `python benchmark.py` from source to check headroom. Developers can

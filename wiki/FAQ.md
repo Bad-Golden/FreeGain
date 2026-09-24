@@ -18,9 +18,18 @@ that turns into feedback, and speaker spill. It doesn't remove crowd noise
 or other instruments on stage that aren't in the reference signal.
 
 **Will it change how the voice sounds?**
-It aims not to. It only subtracts what it predicts came from the speakers,
-and stops adapting while someone is singing. The gate afterwards can be
-set gently or effectively turned off (threshold at −60 dB).
+At normal levels, tests show the voice passing through as cleanly as
+bypass. In feedback mode the output is shifted up by 5 Hz. That's barely
+noticeable on voice, but it can be heard on sustained low notes (a 100 Hz
+note becomes 105 Hz), so turn feedback mode off for instruments where that
+matters and there's no loop. The gate can be set gently or effectively
+turned off (threshold at −60 dB).
+
+**How much more gain before feedback do I get?**
+In closed-loop simulations with realistic singing (3 rooms × 3 melodies),
+6–9 dB more usable gain than bypass, with the voice kept clean. That's
+in line with commercial feedback cancellers. It hasn't been measured on a
+real PA yet.
 
 **How much latency does it add?**
 About 11 ms of processing blocks at 48 kHz, plus your interface's own

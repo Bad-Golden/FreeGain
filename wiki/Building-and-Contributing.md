@@ -38,6 +38,18 @@ callback (no sound card needed), and every console driver against
 simulated consoles over UDP/TCP, including garbage floods and reconnects.
 GitHub Actions runs it on Windows and Linux for every push.
 
+### Closed-loop test
+
+The real use case, simulated sample-accurately: a singer into a mic,
+FreeGain's output to the PA, the PA back into the mic through a room, with
+realistic I/O latency. After a 10 s soundcheck at a safe level it pushes
+the gain up in 3 dB steps and reports the highest level with no howling
+and acceptable voice quality, bypass versus FreeGain:
+
+```
+python tests/stress_feedback_loop.py --songs 3
+```
+
 ### Soak test
 
 A long simulated gig through the real audio engine: music at changing

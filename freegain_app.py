@@ -76,6 +76,7 @@ DEFAULT_CONFIG = {
     "gate_release_ms": 180.0,
     "tail_ms": DEFAULT_TAIL_MS,
     "auto_delay": True,
+    "feedback_mode": True,
 }
 
 
@@ -164,7 +165,8 @@ class FreeGainApp:
         self.config = load_config()
         if self.config["tail_ms"] not in TAIL_OPTIONS_MS:
             self.config["tail_ms"] = DEFAULT_TAIL_MS
-        self.engine = AudioEngine(tail_ms=self.config["tail_ms"])
+        self.engine = AudioEngine(tail_ms=self.config["tail_ms"],
+                                  feedback_mode=bool(self.config["feedback_mode"]))
         self.engine.set_auto_delay(bool(self.config["auto_delay"]))
         self.messages = []   # (time, text) of status messages, for diagnostics
         self.devices = []
@@ -308,6 +310,13 @@ class FreeGainApp:
         self.reference_box.current(min(self.config["reference_channel"], MAX_USB_CHANNELS - 1))
         self.vocal_box.bind("<<ComboboxSelected>>", lambda _e: self._on_channels_changed())
         self.reference_box.bind("<<ComboboxSelected>>", lambda _e: self._on_channels_changed())
+
+        self.feedback_var = tk.BooleanVar(value=bool(self.config["feedback_mode"]))
+        tk.Checkbutton(parent, text="Vocal goes back to the PA (feedback mode)",
+                       variable=self.feedback_var, command=self._on_feedback_mode_changed,
+                       bg=PANEL, fg=TEXT_HI, selectcolor=BG, activebackground=PANEL,
+                       activeforeground=TEXT_HI, font=FONT, anchor="w",
+                       wraplength=190, justify="left").pack(fill="x", padx=8, pady=(10, 0))
 
         tk.Label(parent, text="Room echo tail", bg=PANEL, fg=TEXT_LO,
                  font=FONT).pack(anchor="w", **pad)
@@ -612,6 +621,16 @@ class FreeGainApp:
         tail = TAIL_OPTIONS_MS[self.tail_box.current()]
         self.config["tail_ms"] = tail
         self.engine.set_tail_ms(tail)
+
+    def _on_feedback_mode_changed(self):
+        enabled = bool(self.feedback_var.get())
+        self.config["feedback_mode"] = enabled
+        self.engine.set_feedback_mode(enabled)
+        self._set_status(
+            "Feedback mode on: learns the room, not the singer, and shifts the output "
+            "up 5 Hz to keep the loop stable." if enabled else
+            "Feedback mode off: fastest learning, for spill from a source that doesn't "
+            "include this vocal.")
 
     def _on_auto_delay_changed(self):
         enabled = bool(self.auto_delay_var.get())

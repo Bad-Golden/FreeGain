@@ -18,7 +18,7 @@ It fails (exit code 1) if the output ever goes non-finite or clips wildly,
 if cancellation falls below target once settled, if the singer's voice gets
 damaged, or if processing is too slow for real time.
 
-Usage:  python tests/stress_soak.py [--minutes 10] [--seed 0]
+Usage:  python tests/stress_soak.py [--minutes 10] [--seed 0] [--mode feedback|spill]
 """
 
 import argparse
@@ -91,9 +91,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--minutes", type=float, default=10.0)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--mode", choices=["feedback", "spill"], default="feedback",
+                    help="engine mode (default: feedback, the app's default)")
     args = ap.parse_args()
 
-    engine = AudioEngine(sample_rate=FS)
+    engine = AudioEngine(sample_rate=FS, feedback_mode=(args.mode == "feedback"))
     engine.delay_estimator.interval_s = 0.2
     engine.delay_estimator.start()
     rng = np.random.default_rng(args.seed + 99)

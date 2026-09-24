@@ -45,6 +45,10 @@ class PartitionedFDAF:
     # Blocks in a row where the output is louder than the mic before the
     # divergence guard resets the filter.
     DIVERGENCE_BLOCKS = 8
+    # ...and the leftover must exceed this fraction of the mic's typical
+    # (slowly averaged, ~2 s) energy, so near-silence can't trigger it.
+    DIVERGENCE_FLOOR = 0.01
+    D_LONG_SMOOTHING = 0.0027
     # Smoothing of the block energies used for step-size control.
     ENERGY_SMOOTHING = 0.7
     # The filter counts as "adapted" once it removes this much (10 dB).
@@ -57,6 +61,10 @@ class PartitionedFDAF:
     # 256-sample blocks, 48 kHz): slow enough that a sung phrase doesn't
     # look like a room change.
     ERLE_FALL = 0.0018
+    # Output safety net: fall back to the raw mic when the filtered signal
+    # would be louder than it.
+    SAFE_RATIO = 1.0
+    JOIN_SAMPLES = 32
 
     def __init__(self, filter_length: int = 2048, block_size: int = 256,
                  step_size: float = 0.5, regularization: float = 1e-6):
@@ -88,8 +96,12 @@ class PartitionedFDAF:
         self.erle = 1.0
         self.adapted = False
         self.diverging_blocks = 0
+        self.d_long = 0.0
         self.frozen = False
         self.resets = 0
+        self._mix = 1.0            # 1 = outputting filtered signal, 0 = raw mic
+        self._last_out = 0.0
+        self.bypassed_blocks = 0
         self._in_ref = np.zeros(0)
         self._in_mic = np.zeros(0)
         self._out = np.zeros(0)
@@ -193,14 +205,57 @@ class PartitionedFDAF:
             g[:, N:] = 0.0
             self.W += np.fft.rfft(g, axis=1)
 
-        # Divergence guard: the filter should never make things louder.
-        if d_energy > 1e-10 and e_energy > 4.0 * d_energy:
+        self._divergence_guard(e_energy, d_energy)
+        return self._safe_output(e, d, e_energy, d_energy)
+
+    def _divergence_guard(self, e_energy: float, d_energy: float):
+        """
+        Reset the model if it makes the signal clearly louder for several
+        blocks in a row -- it has diverged.
+
+        The excess must also be significant against the mic's *typical*
+        level. When the music stops and the room falls silent, a leftover
+        prediction of 0.0003 over background noise of 0.0001 is 'louder'
+        but harmless; resetting there threw away everything learned (found
+        by the soak test: ~15 s of poor cancellation after every break).
+        """
+        self.d_long += self.D_LONG_SMOOTHING * (d_energy - self.d_long)
+        if d_energy > 1e-10 and e_energy > 4.0 * d_energy \
+                and e_energy > self.DIVERGENCE_FLOOR * self.d_long:
             self.diverging_blocks += 1
             if self.diverging_blocks >= self.DIVERGENCE_BLOCKS:
                 self._hard_reset()
         else:
             self.diverging_blocks = 0
-        return e
+
+    def _safe_output(self, e, d, e_energy, d_energy):
+        """
+        Safety net: never output more than the raw mic. Removing echo can
+        only make the signal quieter; if the leftover is louder than the
+        mic, the model is wrong right now (still learning, or confused by a
+        closed feedback loop), so pass the mic through instead.
+
+        Switching to the mic happens at once -- none of the bad block gets
+        through -- and only the small step at the joining sample is smoothed
+        away over ~0.7 ms so it doesn't click. Switching back to the filtered
+        signal crossfades over the block.
+        """
+        safe = e_energy <= d_energy * self.SAFE_RATIO
+        was_filtered = self._mix == 1.0
+        if safe and was_filtered:
+            out = e
+        elif not safe:
+            self.bypassed_blocks += 1
+            out = d.copy()
+            if was_filtered:
+                n = min(self.JOIN_SAMPLES, len(out))
+                out[:n] += (self._last_out - d[0]) * np.linspace(1.0, 0.0, n)
+        else:  # recovering: fade from the mic back to the filtered signal
+            w = np.linspace(0.0, 1.0, len(e))
+            out = w * e + (1.0 - w) * d
+        self._mix = 1.0 if safe else 0.0
+        self._last_out = float(out[-1])
+        return out
 
     def _step_scale(self, e, y, e_energy: float, d_energy: float,
                     y_energy: float) -> float:

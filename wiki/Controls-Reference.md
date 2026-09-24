@@ -17,6 +17,7 @@
 | --- | --- |
 | **Vocal mic input** | Input carrying the vocal mic. Shows console channel names when connected. The dot is green when there's signal |
 | **Reference (speaker feed) input** | Input carrying what goes to the speakers. The dot is green when there's signal |
+| **Vocal goes back to the PA (feedback mode)** | On by default. For the normal case where FreeGain's output feeds the PA or monitors, so the loop is closed. The filter learns the room without learning the singer (pre-whitening), and the output is shifted up 5 Hz to keep the loop stable. Turn it off only for spill from a source that never contains this vocal; the filter then learns about 5x faster |
 | **Room echo tail** | How much room reverb the filter models: 40 ms (small room), 85 ms (typical, default), 170 ms (large hall), 340 ms (very live). Longer cancels more in echoey rooms but learns more slowly and uses a little more CPU. Changing it keeps what's been learned |
 | **Find speaker delay automatically** | Measures how late the speaker sound reaches the mic (needs music playing) and lines the signals up, so the echo tail is spent on the room, not on travel time. Handles delays up to 500 ms |
 | **Speaker delay** | The measured delay, e.g. "9.2 ms". About 3 ms per metre between speaker and mic, plus any console/USB routing delay |

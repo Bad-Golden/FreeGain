@@ -49,6 +49,8 @@ that channel in your mix **instead of** the raw vocal channel.
   seconds, **Speaker delay** (left panel) shows how late the speakers reach
   the mic, and the **Cancellation depth** meter rises as FreeGain learns the
   room. 15–30 dB is a good real-world result.
+- Leave **Vocal goes back to the PA (feedback mode)** ticked whenever
+  FreeGain's output goes to the PA or monitors.
 - Pick a **Room echo tail** to suit the room: 85 ms (typical) is the
   default. Try 170 ms in a big or echoey hall.
 - If you move mics or speakers, press **Relearn room**.

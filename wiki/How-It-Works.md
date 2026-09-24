@@ -61,7 +61,37 @@ In simulated rooms (speaker 3–7 m away, 30–150 ms of reverb) it cancels
 25–90 dB after a few seconds of music. The previous 5 ms filter managed
 0 dB in the same rooms.
 
-## The gate
+## Feedback mode: the closed loop
+
+When FreeGain's output feeds the PA, the singer's voice reaches the mic
+directly *and* comes back out of the speakers tens of milliseconds later.
+To an adaptive filter these look alike. A sustained sung note repeats
+itself, so a plain echo canceller lowers its error by *cancelling the
+singer*. This is the classic "closed-loop bias" of feedback cancellers. In
+testing, a plain canceller with realistic singing cut the voice quality from
+24 dB to about 3 dB, a warbly, phasey sound.
+
+Feedback mode uses the two standard remedies together:
+
+- **Pre-whitening (the prediction error method).** FreeGain continuously
+  models the voice: its vowel resonances (a 20th-order linear predictor)
+  and its pitch (a long-term predictor). It learns from versions of the
+  reference and the leftover with that model removed. After whitening the
+  voice looks like noise, which no longer matches its own echo, while the
+  room's response is unchanged. So the filter learns the room, not the
+  singer.
+- **A 5 Hz frequency shift** on the output. The voice coming back through
+  the speakers no longer lines up with the live voice, which breaks the
+  remaining correlation and spreads the energy of any ringing frequency.
+  It's done with a pair of all-pass filters kept 90° apart, which adds
+  almost no latency, unlike the usual 5–10 ms Hilbert filter.
+- Learning is also deliberately slower (step 0.1 instead of 0.5), so the
+  filter averages over much longer than one sung note.
+
+**Safety net (both modes):** FreeGain's output is never allowed to be
+louder than the raw mic. If the filter's model is wrong at any moment, that
+block passes the mic through untouched, with the join smoothed so it doesn't
+click.
 
 A simple envelope gate/expander after the filter. Below the threshold, the
 output is scaled down in proportion to how far below it is. Attack and
