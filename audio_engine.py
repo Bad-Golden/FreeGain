@@ -1,8 +1,8 @@
 """
 audio_engine.py
 
-Handles audio I/O via sounddevice (PortAudio) and runs each block
-through the NLMS filter + gate.
+Handles audio I/O via sounddevice (PortAudio) and runs each block through
+the echo/feedback canceller and the gate.
 
 Works with any audio interface PortAudio can open -- a console's built-in
 USB interface, Dante Virtual Soundcard, an external interface fed from the
@@ -10,15 +10,39 @@ console's direct outs, etc. The mic and reference signals are picked by
 input channel index (0-based), so you choose which input carries the vocal
 mic and which carries the speaker feed. The stream is opened with just
 enough input channels to cover both selections.
+
+Signal chain per block:
+
+  reference -> [bulk delay, from the delay estimator] -> PBFDAF filter
+  mic -------------------------------------------------> (-) -> gate -> out
+
+The delay estimator (delay_estimator.py) measures how late the speaker
+sound reaches the mic and the reference is delayed by that much (minus a
+safety margin), so the filter's taps cover the room's reverb rather than
+the travel time.
 """
 
 import os
 import threading
+import time
+from collections import deque
 
 import numpy as np
 
-from nlms_filter import NLMSFilter, cancellation_depth_db
+from delay_estimator import DelayEstimator
+from fdaf_filter import PartitionedFDAF
+from nlms_filter import cancellation_depth_db
 from simple_gate import SimpleGate
+
+# Echo tail options offered in the UI (milliseconds of room modelled after
+# the bulk delay). Longer = more cancellation in reverberant rooms, slower
+# to converge, more CPU.
+TAIL_OPTIONS_MS = (40, 85, 170, 340)
+DEFAULT_TAIL_MS = 85
+MAX_BULK_DELAY_MS = 500.0
+DELAY_MARGIN_MS = 5.0        # start the filter this much before the direct sound
+DELAY_CHANGE_MS = 2.0        # ignore estimate changes smaller than this
+FILTER_BLOCK = 256
 
 
 def _sd():
@@ -35,26 +59,37 @@ def _sd():
 
 
 class AudioEngine:
-    def __init__(self, sample_rate=None, block_size: int = 512, num_taps: int = 256):
+    def __init__(self, sample_rate=None, block_size: int = 512,
+                 tail_ms: float = DEFAULT_TAIL_MS):
         # sample_rate=None means "use the device's native rate" -- console
         # interfaces usually run at 48 kHz, and forcing a different rate
         # either fails to open or makes the OS resample behind our back.
         self.requested_sample_rate = sample_rate
         self.sample_rate = float(sample_rate or 48000)
         self.block_size = block_size
-        self.filter = NLMSFilter(num_taps=num_taps, step_size=0.5)
+        self.tail_ms = float(tail_ms)
+        self.filter = self._make_filter()
         self.gate = SimpleGate(sample_rate=self.sample_rate)
+        self.delay_estimator = DelayEstimator(self.sample_rate, MAX_BULK_DELAY_MS)
         self.stream = None
         self.engaged = True
+        self.auto_delay = True
 
         self.mic_channel = 0
         self.reference_channel = 1
         self.input_device = None
         self.output_device = None
 
-        # Set from the UI thread, acted on at the start of the next audio
-        # block -- so the filter is never reset halfway through processing.
+        # Applied bulk delay of the reference, in samples.
+        self.bulk_delay = 0
+        self._max_delay = int(MAX_BULK_DELAY_MS / 1000 * self.sample_rate)
+        self._ref_history = np.zeros(self._max_delay)
+        self.delay_changes = deque(maxlen=100)   # (time, old_ms, new_ms)
+
+        # Requests from the UI thread, acted on at the start of the next audio
+        # block -- so the filter is never swapped or reset mid-processing.
         self._reset_requested = threading.Event()
+        self._pending_filter = None
 
         # Latest metering info, read by the UI refresh loop.
         self.last_input_peak = 0.0
@@ -62,6 +97,14 @@ class AudioEngine:
         self.last_reference_peak = 0.0
         self.last_cancellation_depth_db = 0.0
         self.xrun_count = 0
+        self.blocks_processed = 0
+
+        # Diagnostics: CPU load of the audio callback and per-second history.
+        self.cpu_load = 0.0          # smoothed: processing time / block duration
+        self.cpu_load_peak = 0.0
+        self.history = deque(maxlen=600)   # (time, depth_dB, in_peak, ref_peak, delay_ms)
+        self._acc = [0.0, 0, 0.0, 0.0]     # depth sum, blocks, in peak, ref peak
+        self._acc_start = time.monotonic()
 
     # ---------- Device handling ----------
 
@@ -106,10 +149,7 @@ class AudioEngine:
                 f"channel(s), but channel {in_channels} was selected.")
 
         rate = self.requested_sample_rate or in_info["default_samplerate"]
-        self.sample_rate = float(rate)
-        self.gate.set_sample_rate(self.sample_rate)
-        self.gate.reset()
-        self._reset_requested.set()  # new device = new room/latency, relearn
+        self.set_sample_rate(float(rate))
 
         stream = sd.Stream(
             device=(self.input_device, self.output_device),
@@ -121,20 +161,46 @@ class AudioEngine:
         )
         stream.start()
         self.stream = stream
+        self.delay_estimator.start()
 
     def stop(self):
+        self.delay_estimator.stop()
         stream, self.stream = self.stream, None
         if stream:
             stream.stop()
             stream.close()
 
+    def set_sample_rate(self, rate: float):
+        """Rebuild everything that depends on the sample rate (stream stopped)."""
+        self.sample_rate = float(rate)
+        self.gate.set_sample_rate(self.sample_rate)
+        self.gate.reset()
+        self.filter = self._make_filter()
+        self.delay_estimator.stop()
+        self.delay_estimator = DelayEstimator(self.sample_rate, MAX_BULK_DELAY_MS)
+        self._max_delay = int(MAX_BULK_DELAY_MS / 1000 * self.sample_rate)
+        self._ref_history = np.zeros(self._max_delay)
+        self.bulk_delay = 0
+
     # ---------- Controls (called from the UI thread) ----------
 
     def trigger_relearn(self):
+        """Forget the room: reset the filter and re-measure the delay."""
+        self.delay_estimator.reset()
         self._reset_requested.set()
 
     def set_engaged(self, engaged: bool):
         self.engaged = engaged
+
+    def set_auto_delay(self, enabled: bool):
+        self.auto_delay = enabled
+        if not enabled:
+            self._pending_delay = 0
+
+    def set_tail_ms(self, tail_ms: float):
+        """Change how much room reverb the filter models. Applied next block."""
+        self.tail_ms = float(tail_ms)
+        self._pending_filter = self._make_filter()
 
     def set_gate_threshold_db(self, threshold_db: float):
         self.gate.set_threshold_db(threshold_db)
@@ -142,9 +208,20 @@ class AudioEngine:
     def set_gate_timing(self, attack_ms: float, release_ms: float):
         self.gate.set_timing(attack_ms, release_ms)
 
+    @property
+    def bulk_delay_ms(self) -> float:
+        return 1000.0 * self.bulk_delay / self.sample_rate
+
+    def _make_filter(self) -> PartitionedFDAF:
+        taps = int(self.tail_ms / 1000.0 * self.sample_rate)
+        return PartitionedFDAF(filter_length=taps, block_size=FILTER_BLOCK)
+
     # ---------- Audio thread ----------
 
+    _pending_delay = None
+
     def _callback(self, indata, outdata, frames, time_info, status):
+        started = time.perf_counter()
         # Don't print from the audio thread -- console I/O can block long
         # enough to cause the very dropouts being reported. Just count them.
         if status:
@@ -155,20 +232,24 @@ class AudioEngine:
         if frames == 0:
             return
 
-        if self._reset_requested.is_set():
-            self._reset_requested.clear()
-            self.filter.reset()
-
         channels = indata.shape[1]
         mic = indata[:, min(self.mic_channel, channels - 1)].astype(np.float64)
         reference = indata[:, min(self.reference_channel, channels - 1)].astype(np.float64)
+        if not np.all(np.isfinite(mic)):
+            mic = np.nan_to_num(mic, nan=0.0, posinf=0.0, neginf=0.0)
+        if not np.all(np.isfinite(reference)):
+            reference = np.nan_to_num(reference, nan=0.0, posinf=0.0, neginf=0.0)
+
+        self._apply_pending_changes()
+        self.delay_estimator.push(reference, mic)
+        delayed_ref = self._delay_reference(reference)
 
         if self.engaged:
-            residual = self.filter.process_block(reference, mic)
+            residual = self.filter.process(delayed_ref, mic)
             out = self.gate.process_block(residual)
             depth = cancellation_depth_db(mic, residual)
         else:
-            out = np.nan_to_num(mic, nan=0.0, posinf=0.0, neginf=0.0)
+            out = mic
             depth = 0.0
 
         outdata[:, 0] = np.clip(out, -1.0, 1.0).astype(np.float32)
@@ -179,6 +260,91 @@ class AudioEngine:
         self.last_output_peak = _peak(out)
         self.last_reference_peak = _peak(reference)
         self.last_cancellation_depth_db = depth
+        self.blocks_processed += 1
+        self._update_stats(depth, frames, time.perf_counter() - started)
+
+    def _apply_pending_changes(self):
+        if self._pending_filter is not None:
+            new, self._pending_filter = self._pending_filter, None
+            new.inherit(self.filter)
+            self.filter = new
+        if self._reset_requested.is_set():
+            self._reset_requested.clear()
+            self.filter.reset()
+            self.gate.reset()
+
+        if self.auto_delay:
+            measured = self.delay_estimator.delay_samples
+            if measured is not None:
+                margin = int(DELAY_MARGIN_MS / 1000 * self.sample_rate)
+                self._pending_delay = max(0, min(self._max_delay, measured - margin))
+        if self._pending_delay is not None:
+            change = abs(self._pending_delay - self.bulk_delay)
+            if change > DELAY_CHANGE_MS / 1000 * self.sample_rate:
+                # The learned taps are aligned to the old delay; start over.
+                old_ms = self.bulk_delay_ms
+                self.bulk_delay = self._pending_delay
+                self.delay_changes.append((time.time(), old_ms, self.bulk_delay_ms))
+                self.filter.reset()
+            self._pending_delay = None
+
+    def _delay_reference(self, reference: np.ndarray) -> np.ndarray:
+        n = len(reference)
+        buf = np.concatenate([self._ref_history, reference])
+        self._ref_history = buf[-self._max_delay:] if self._max_delay else np.zeros(0)
+        end = len(buf) - self.bulk_delay
+        return buf[end - n:end]
+
+    def _update_stats(self, depth: float, frames: int, elapsed: float):
+        load = elapsed / (frames / self.sample_rate)
+        self.cpu_load = 0.95 * self.cpu_load + 0.05 * load
+        self.cpu_load_peak = max(self.cpu_load_peak, load)
+        acc = self._acc
+        acc[0] += depth
+        acc[1] += 1
+        acc[2] = max(acc[2], self.last_input_peak)
+        acc[3] = max(acc[3], self.last_reference_peak)
+        now = time.monotonic()
+        if now - self._acc_start >= 1.0:
+            self.history.append((time.time(), acc[0] / acc[1], acc[2], acc[3], self.bulk_delay_ms))
+            self._acc = [0.0, 0, 0.0, 0.0]
+            self._acc_start = now
+
+    # ---------- Diagnostics ----------
+
+    def diagnostics(self) -> dict:
+        est = self.delay_estimator
+        return {
+            "running": self.running,
+            "sample_rate": self.sample_rate,
+            "block_size": self.block_size,
+            "input_device": self.input_device,
+            "output_device": self.output_device,
+            "mic_channel": self.mic_channel + 1,
+            "reference_channel": self.reference_channel + 1,
+            "engaged": self.engaged,
+            "tail_ms": self.tail_ms,
+            "filter_taps": self.filter.filter_length,
+            "filter_resets": self.filter.resets,
+            "auto_delay": self.auto_delay,
+            "bulk_delay_ms": round(self.bulk_delay_ms, 2),
+            "measured_delay_ms": None if est.delay_ms is None else round(est.delay_ms, 2),
+            "delay_peak_ratio": round(est.last_ratio, 1),
+            "delay_changes": [(round(t, 1), round(a, 2), round(b, 2))
+                              for t, a, b in self.delay_changes],
+            "delay_history": [(round(t, 1), None if ms is None else round(ms, 2), round(r, 1), ok)
+                              for t, ms, r, ok in est.history],
+            "cpu_load_percent": round(100 * self.cpu_load, 1),
+            "cpu_load_peak_percent": round(100 * self.cpu_load_peak, 1),
+            "xruns": self.xrun_count,
+            "blocks_processed": self.blocks_processed,
+            "gate": {"threshold_linear": self.gate.threshold_linear,
+                     "attack_ms": self.gate.attack_ms, "release_ms": self.gate.release_ms},
+            "history_per_second": [
+                {"t": round(t, 1), "depth_db": round(d, 1), "input_peak": round(i, 4),
+                 "reference_peak": round(r, 4), "delay_ms": round(ms, 2)}
+                for t, d, i, r, ms in self.history],
+        }
 
 
 def _peak(block: np.ndarray) -> float:

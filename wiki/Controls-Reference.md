@@ -17,7 +17,10 @@
 | --- | --- |
 | **Vocal mic input** | Input carrying the vocal mic. Shows console channel names when connected. The dot is green when there's signal |
 | **Reference (speaker feed) input** | Input carrying what goes to the speakers. The dot is green when there's signal |
-| **Relearn room** | Forgets what the filter learned and starts fresh. Use after moving mics or speakers |
+| **Room echo tail** | How much room reverb the filter models: 40 ms (small room), 85 ms (typical, default), 170 ms (large hall), 340 ms (very live). Longer cancels more in echoey rooms but learns more slowly and uses a little more CPU. Changing it keeps what's been learned |
+| **Find speaker delay automatically** | Measures how late the speaker sound reaches the mic (needs music playing) and lines the signals up, so the echo tail is spent on the room, not on travel time. Handles delays up to 500 ms |
+| **Speaker delay** | The measured delay, e.g. "9.2 ms". About 3 ms per metre between speaker and mic, plus any console/USB routing delay |
+| **Relearn room** | Forgets what the filter learned, re-measures the delay and starts fresh. Use after moving mics or speakers |
 | **Panic mute** | Mutes mute group 1, or the vocal channel on consoles without mute groups. Stays red while muted; click again to unmute |
 
 ## Main area
@@ -26,11 +29,12 @@
 | --- | --- |
 | **Active / Bypassed** | Active = processing on. Bypassed = mic passes through untouched |
 | **Input meter** | Vocal mic level, −60 to 0 dBFS |
-| **Cancellation depth** | How much the filter is removing, in dB (0–30 dB scale). Also shows a dropout count if the computer falls behind |
+| **Cancellation depth** | How much the filter is removing, in dB (0–30 dB scale). Also shows the audio CPU load, and a dropout count if the computer falls behind |
 | **Threshold** | Gate threshold, −60 to 0 dB. Below it the output is turned down |
 | **Attack** | How fast the gate opens, 0.5–50 ms |
 | **Release** | How fast the gate closes, 10–1000 ms |
 | **Output meter** | Processed vocal level |
 | **Status line** | Sample rate, inputs in use, and any errors |
+| **Save diagnostics…** | Saves a JSON report of the session (settings, devices, delay, CPU, dropouts, per-second cancellation history) to send with test results. No audio is recorded |
 
 All settings are saved when you close the window.

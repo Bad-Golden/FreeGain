@@ -54,6 +54,17 @@ see all channels, or install the console's driver (see [[Audio Setup]]).
   cancel.
 - Vocal and Reference must be **different** inputs.
 
+**Cancellation depth is low (under ~10 dB)**
+- Check **Speaker delay** in the left panel. If it keeps saying
+  "measuring…", the reference and mic don't share enough sound: play music
+  through the speakers, and check the Reference is the feed those speakers
+  get.
+- Try a longer **Room echo tail** (170 ms) in big or echoey rooms.
+- If the reference passes through processing the mic doesn't hear (heavy
+  compression, pitch/delay effects), take the reference from before those
+  effects.
+- Press **Save diagnostics…** and send the file.
+
 **Dropouts counter keeps climbing / crackles**
 The computer can't keep up. Close other programs, use ASIO on Windows, or
 run `python benchmark.py` from source to check headroom. Developers can
@@ -87,6 +98,6 @@ connected (green label).
 
 ## Still stuck?
 Open an **Issue** on GitHub with:
-- your OS and version,
+- the file from **Save diagnostics…** (bottom right of the window),
 - your console model,
 - a screenshot of FreeGain, including the bottom status line.

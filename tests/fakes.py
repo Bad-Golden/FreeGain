@@ -90,9 +90,12 @@ class FakeTCPConsole:
                     pending += chunk
                     *lines, pending = pending.split(b"\n")
                     for line in lines:
-                        reply = self.responder(line.decode())
+                        reply = self.responder(line.decode(errors="replace"))
                         if reply:
-                            conn.sendall(reply.encode() + b"\n")
+                            try:
+                                conn.sendall(reply.encode() + b"\n")
+                            except OSError:
+                                break  # client hung up mid-reply
             conn.close()
 
     def close(self):

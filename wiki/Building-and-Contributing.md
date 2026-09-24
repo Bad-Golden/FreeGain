@@ -6,7 +6,10 @@
 | --- | --- |
 | `freegain_app.py` | tkinter UI |
 | `audio_engine.py` | Audio I/O (sounddevice/PortAudio), channel routing, runs filter + gate |
-| `nlms_filter.py` | NLMS adaptive filter and cancellation-depth estimate |
+| `fdaf_filter.py` | Echo canceller (partitioned-block frequency-domain adaptive filter) |
+| `delay_estimator.py` | Speaker-to-mic delay finder (GCC-PHAT, background thread) |
+| `diagnostics.py` | "Save diagnostics" report |
+| `nlms_filter.py` | Original NLMS filter (reference) and cancellation-depth helper |
 | `simple_gate.py` | Envelope gate/expander |
 | `consoles/` | Console drivers and the model list (`profiles.py`) |
 | `tests/` | pytest suite, including fake consoles over real sockets |
@@ -29,9 +32,23 @@ python -m venv .venv
 python -m pytest
 ```
 
-The suite covers the filter, the gate, the audio callback (no sound card
-needed), and every console driver against simulated consoles over UDP/TCP.
+The suite covers the echo canceller in simulated rooms (including
+double-talk and room changes), the delay finder, the gate, the audio
+callback (no sound card needed), and every console driver against
+simulated consoles over UDP/TCP, including garbage floods and reconnects.
 GitHub Actions runs it on Windows and Linux for every push.
+
+### Soak test
+
+A long simulated gig through the real audio engine: music at changing
+levels, a singer coming and going, the mic moved, the speaker delay
+jumping, silence, clipping, driver glitches, irregular block sizes and
+settings changed during playback. It prints a per-segment table and fails
+on any invalid output, lost voice, poor cancellation or slow processing:
+
+```
+python tests/stress_soak.py --minutes 30
+```
 
 ## Building the apps
 

@@ -1,6 +1,9 @@
+import threading
+
 import numpy as np
 
 from audio_engine import AudioEngine
+from roomsim import FS, depth_db, echo, music, room
 
 
 def run_block(engine, indata):
@@ -9,8 +12,18 @@ def run_block(engine, indata):
     return outdata
 
 
+def run_signal(engine, mic, ref, block=512, extra_channels=0):
+    out = []
+    for i in range(0, len(mic) - block + 1, block):
+        indata = np.zeros((block, 2 + extra_channels))
+        indata[:, engine.mic_channel] = mic[i:i + block]
+        indata[:, engine.reference_channel] = ref[i:i + block]
+        out.append(run_block(engine, indata)[:, 0])
+    return np.concatenate(out)
+
+
 def test_selected_channels_are_used():
-    engine = AudioEngine(sample_rate=48000, num_taps=16)
+    engine = AudioEngine(sample_rate=48000)
     engine.configure(mic_channel=3, reference_channel=5)
     indata = np.zeros((256, 6))
     indata[:, 3] = 0.5  # mic
@@ -29,22 +42,120 @@ def test_zero_length_block_is_ignored():
 
 
 def test_relearn_resets_on_next_block():
-    engine = AudioEngine(sample_rate=48000, num_taps=16)
+    engine = AudioEngine(sample_rate=48000)
     rng = np.random.default_rng(0)
-    indata = rng.standard_normal((512, 2)) * 0.1
-    run_block(engine, indata)
-    assert engine.filter.taps.any()
+    run_block(engine, rng.standard_normal((512, 2)) * 0.1)
+    assert engine.filter.W.any()
     engine.trigger_relearn()
-    assert engine.filter.taps.any()  # not touched from the UI thread
-    run_block(engine, np.zeros((1, 2)))
-    assert not engine.filter.taps.any()
+    assert engine.filter.W.any()  # not touched from the UI thread
+    run_block(engine, np.zeros((512, 2)))
+    assert not engine.filter.W.any()
 
 
-def test_output_is_clipped_and_status_counted():
-    engine = AudioEngine(sample_rate=48000, num_taps=16)
+def test_output_is_clipped_nan_safe_and_status_counted():
+    engine = AudioEngine(sample_rate=48000)
     engine.set_engaged(False)
     outdata = np.zeros((4, 1), dtype=np.float32)
-    indata = np.full((4, 2), 3.0, dtype=np.float32)
+    indata = np.array([[3.0, 0.0], [np.nan, np.inf], [-np.inf, 1.0], [0.5, 0.5]], dtype=np.float32)
     engine._callback(indata, outdata, 4, None, "input overflow")
-    assert np.all(outdata <= 1.0)
+    assert np.all(np.isfinite(outdata)) and np.all(np.abs(outdata) <= 1.0)
     assert engine.xrun_count == 1
+
+
+def test_cancels_a_realistic_room_with_auto_delay():
+    """Speaker 3 m away (9 ms) plus 60 ms of reverb: the old 5 ms filter got 0 dB."""
+    x = music(8)
+    d = echo(x, room(delay_ms=9, tail_ms=60))
+    engine = AudioEngine(sample_rate=FS)
+    half = len(x) // 2
+    run_signal(engine, d[:half], x[:half])
+    engine.delay_estimator.estimate_once()
+    engine.delay_estimator.estimate_once()
+    assert abs(engine.delay_estimator.delay_ms - 9) < 1.0
+    out = run_signal(engine, d[half:], x[half:])
+    assert abs(engine.bulk_delay_ms - 4) < 1.0  # 9 ms minus the 5 ms safety margin
+    assert depth_db(d[-FS:], out[-FS:]) > 25
+
+
+def test_long_speaker_delay_is_compensated():
+    """A 120 ms delay (delay tower / long USB routing) is beyond the filter's
+    own 85 ms window; the bulk delay has to bring it into range."""
+    x = music(8, seed=4)
+    d = echo(x, room(delay_ms=120, tail_ms=40, seed=4))
+    engine = AudioEngine(sample_rate=FS)
+    half = len(x) // 2
+    run_signal(engine, d[:half], x[:half])
+    engine.delay_estimator.estimate_once()
+    engine.delay_estimator.estimate_once()
+    out = run_signal(engine, d[half:], x[half:])
+    assert depth_db(d[-FS:], out[-FS:]) > 25
+
+    manual = AudioEngine(sample_rate=FS)
+    manual.set_auto_delay(False)
+    out = run_signal(manual, d, x)
+    assert depth_db(d[-FS:], out[-FS:]) < 3  # without it: nothing
+
+
+def test_tail_change_takes_effect_on_audio_thread():
+    engine = AudioEngine(sample_rate=FS, tail_ms=40)
+    assert engine.filter.filter_length == 2048
+    engine.set_tail_ms(170)
+    assert engine.filter.filter_length == 2048
+    run_block(engine, np.zeros((512, 2)))
+    assert engine.filter.filter_length >= 8160
+
+
+def test_irregular_block_sizes():
+    x = music(3, seed=2)
+    d = echo(x, room(2, 20, seed=2))
+    engine = AudioEngine(sample_rate=FS)
+    rng = np.random.default_rng(5)
+    pos, outs = 0, []
+    while pos < len(x):
+        n = int(rng.choice([1, 37, 256, 441, 512, 1000, 2048]))
+        n = min(n, len(x) - pos)
+        indata = np.stack([d[pos:pos + n], x[pos:pos + n]], axis=1)
+        outs.append(run_block(engine, indata)[:, 0])
+        pos += n
+    out = np.concatenate(outs)
+    assert len(out) == len(x) and np.all(np.isfinite(out))
+    assert depth_db(d[-FS // 2:], out[-FS // 2:]) > 15
+
+
+def test_diagnostics_snapshot_is_json_ready():
+    import json
+    engine = AudioEngine(sample_rate=FS)
+    run_signal(engine, music(1), music(1, seed=3))
+    info = engine.diagnostics()
+    json.dumps(info)
+    assert info["filter_taps"] >= 4000 and info["blocks_processed"] > 0
+    assert 0 <= info["cpu_load_percent"]
+
+
+def test_ui_thread_changes_while_audio_runs():
+    """Hammer relearn / tail / gate / bypass from another thread during processing."""
+    engine = AudioEngine(sample_rate=FS)
+    x, stop, errors = music(4), threading.Event(), []
+
+    def poke():
+        i = 0
+        while not stop.is_set():
+            try:
+                engine.trigger_relearn()
+                engine.set_tail_ms([40, 85, 170][i % 3])
+                engine.set_gate_threshold_db(-60 + i % 50)
+                engine.set_gate_timing(1 + i % 20, 50 + i % 500)
+                engine.set_engaged(i % 7 != 0)
+                i += 1
+            except Exception as exc:  # pragma: no cover - reported below
+                errors.append(exc)
+
+    t = threading.Thread(target=poke)
+    t.start()
+    try:
+        out = run_signal(engine, echo(x, room(5, 30)), x)
+    finally:
+        stop.set()
+        t.join()
+    assert not errors
+    assert np.all(np.isfinite(out))

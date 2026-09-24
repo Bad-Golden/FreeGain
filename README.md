@@ -4,8 +4,9 @@
 console, troubleshooting, FAQ).
 
 FreeGain listens to a vocal mic and to the signal feeding your speakers.
-It learns the acoustic path between the two with an NLMS adaptive filter
-and subtracts the predicted feedback and room spill from the mic. A gate
+It measures how late the speaker sound reaches the mic, learns the room's
+echo with a frequency-domain adaptive filter (up to 340 ms of reverb), and
+subtracts the predicted feedback and room spill from the mic. A gate
 follows the filter. For many consoles the app can also talk to the desk
 over the network, to show channel names and to give you a panic mute.
 
@@ -128,14 +129,23 @@ python3 -m venv .venv
    The label turns green ("connected") once the console actually answers.
    On consoles that support it, channel names then appear in the input
    pickers.
-6. **Relearn room** clears what the filter has learned. Use it after moving
-   mics or speakers.
-7. **Panic mute** stays lit while the mute is active. On consoles with mute
+6. **Room echo tail** sets how much reverb the filter models: 40 ms (small
+   room), 85 ms (typical, the default), 170 ms (large hall) or 340 ms (very
+   live). Longer cancels more in reverberant rooms but takes longer to learn.
+   Changing it keeps what has already been learned.
+   **Find speaker delay automatically** measures how late the speaker sound
+   reaches the mic (it needs music playing) and shows it under the checkbox.
+7. **Relearn room** clears what the filter has learned and re-measures the
+   delay. Use it after moving mics or speakers.
+8. **Panic mute** stays lit while the mute is active. On consoles with mute
    groups it toggles mute group 1, so assign the channels you want silenced
    to that group. On other consoles it mutes the selected vocal channel,
    assuming console channel N comes in as input N.
-8. **Active / Bypassed** switches processing off and passes the mic through
+9. **Active / Bypassed** switches processing off and passes the mic through
    untouched.
+10. **Save diagnostics…** (bottom right) writes a JSON report of the session:
+    settings, devices, measured delay, CPU load, dropouts, and a per-second
+    history of cancellation depth and levels. Send it along with test reports.
 
 Settings (IP, console model, devices, channels, gate) are saved to
 `local_config.json` when you close the window. That file sits next to
@@ -177,7 +187,10 @@ zero-padded numbers. The `*_values` pairs are `[unmuted, muted]`.
 | --- | --- |
 | `freegain_app.py` | tkinter UI |
 | `audio_engine.py` | Audio I/O (`sounddevice`) and channel routing; runs the filter and gate |
-| `nlms_filter.py` | NLMS adaptive filter plus the cancellation-depth estimate |
+| `fdaf_filter.py` | The echo canceller: partitioned-block frequency-domain adaptive filter |
+| `delay_estimator.py` | Measures the speaker-to-mic delay (GCC-PHAT) on a background thread |
+| `diagnostics.py` | Builds the "Save diagnostics" report |
+| `nlms_filter.py` | Original sample-by-sample NLMS filter (kept for reference) and the cancellation-depth helper |
 | `simple_gate.py` | Envelope gate/expander |
 | `consoles/profiles.py` | The console model list |
 | `consoles/osc.py` | OSC driver (Behringer, Midas, Wing, Generic OSC) |
@@ -190,17 +203,24 @@ zero-padded numbers. The `*_values` pairs are `[unmuted, muted]`.
 
 ## Performance
 
-The filter works one sample at a time in Python, with numpy doing the
-per-tap math. Check your headroom with:
+The echo canceller works on blocks in the frequency domain, so even the
+longest echo tail uses little CPU. Check your headroom with:
 
 ```
 python benchmark.py
 ```
 
-Anything comfortably above 1× real time works. On the development machine
-256 taps at 48 kHz ran at about 4.6× real time for filter plus gate. If the
-dropout counter next to "Cancellation depth" keeps rising, lower `num_taps`
-in `AudioEngine`, or raise `block_size` (which adds latency).
+On the development machine (filter plus gate, 48 kHz):
+
+| Echo tail | Taps | Speed | CPU |
+| --- | --- | --- | --- |
+| 40 ms | 2048 | 21× real time | ~5% |
+| 85 ms | 4096 | 17× real time | ~6% |
+| 170 ms | 8192 | 14× real time | ~7% |
+| 340 ms | 16384 | 9× real time | ~11% |
+
+The app shows live CPU load next to "Cancellation depth". If the dropout
+counter keeps rising, pick a shorter echo tail.
 
 ## Testing
 
@@ -211,12 +231,22 @@ python -m pytest
 
 The suite covers:
 
-- **Filter:** convergence, running-energy accuracy across buffer wraps,
-  NaN/Inf input, empty or mismatched blocks, reset.
+- **Echo canceller:** convergence in simulated rooms (1–20 ms speaker
+  delay, 3–150 ms reverb), background noise, double-talk (singing over the
+  PA without the voice being learned or damaged), re-learning after a mic
+  moves, NaN/Inf, clipping, DC, silence, divergence recovery, irregular
+  block sizes, a two-minute stability run, and speed per echo tail.
+- **Delay finder:** accuracy from 0 to 400 ms with noise and talking (within
+  1 ms), silence and unrelated audio (no false estimate), feedback loops
+  (the vocal inside the reference is ignored), ring-buffer wrap-around.
 - **Gate:** gating behaviour, NaN handling, block vs per-sample equivalence,
   sample-rate changes.
-- **Audio engine:** channel routing, relearn timing, clipping, zero-length
-  blocks, dropout counting. No sound card needed.
+- **Audio engine:** channel routing, automatic delay compensation (including
+  a 120 ms delay), echo-tail changes, relearn timing, clipping, NaN input,
+  irregular block sizes, diagnostics, and controls changed from another
+  thread while audio runs. No sound card needed.
+- **Console stress:** garbage-packet floods, malformed and huge replies,
+  console reboots and reconnects, rapid connect/disconnect (no thread leaks).
 - **Console drivers:** every model in the list builds a working driver.
   Round trips run against fake consoles on localhost: OSC (XAir, X32, Wing,
   Generic) over UDP, Yamaha RCP and Allen & Heath over TCP. Also covered:
@@ -224,6 +254,15 @@ The suite covers:
   when no console is present, garbage data, malformed meter blobs.
 
 GitHub Actions runs the suite on Windows and Linux for every push.
+
+There's also a long **soak test** that plays a simulated gig through the real
+audio engine: music at changing levels, a singer coming and going, the mic
+being moved, the speaker delay jumping, silence, clipping, driver glitches,
+irregular block sizes, and settings changed during playback:
+
+```
+python tests/stress_soak.py --minutes 30
+```
 
 ## Known limitations
 
@@ -241,6 +280,6 @@ GitHub Actions runs the suite on Windows and Linux for every push.
 ## License
 
 MIT, Peninsula Pulse DJs. Independent implementation using publicly
-documented techniques (NLMS adaptive filtering; the consoles' published
+documented techniques (adaptive echo cancellation; the consoles' published
 remote-control protocols). Not affiliated with Alpha Labs, Behringer,
 Midas, Music Tribe, Yamaha, Allen & Heath, Soundcraft or Harman.

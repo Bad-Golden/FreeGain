@@ -19,11 +19,14 @@ import math
 import os
 import queue
 import sys
+import time
 import tkinter as tk
 from pathlib import Path
-from tkinter import ttk, messagebox
+from tkinter import filedialog, ttk, messagebox
 
-from audio_engine import AudioEngine
+import diagnostics
+from audio_engine import DEFAULT_TAIL_MS, TAIL_OPTIONS_MS, AudioEngine
+from version import __version__
 from consoles import (CONSOLE_PROFILES, DEFAULT_PROFILE, AudioOnlyDriver, brands,
                       create_driver, models_for_brand)
 
@@ -71,6 +74,8 @@ DEFAULT_CONFIG = {
     "gate_threshold_db": -34.0,
     "gate_attack_ms": 3.0,
     "gate_release_ms": 180.0,
+    "tail_ms": DEFAULT_TAIL_MS,
+    "auto_delay": True,
 }
 
 
@@ -150,14 +155,19 @@ class ActiveDot(tk.Canvas):
 class FreeGainApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("FreeGain")
+        self.root.title(f"FreeGain {__version__}")
         self._set_window_icon()
         self.root.configure(bg=BG)
         self.root.geometry("840x600")
         self.root.minsize(780, 540)
 
         self.config = load_config()
-        self.engine = AudioEngine()
+        if self.config["tail_ms"] not in TAIL_OPTIONS_MS:
+            self.config["tail_ms"] = DEFAULT_TAIL_MS
+        self.engine = AudioEngine(tail_ms=self.config["tail_ms"])
+        self.engine.set_auto_delay(bool(self.config["auto_delay"]))
+        self.messages = []   # (time, text) of status messages, for diagnostics
+        self.devices = []
         self.console = AudioOnlyDriver(CONSOLE_PROFILES["audio_only"])
         self.engaged = True
         self.panic_active = False
@@ -249,8 +259,13 @@ class FreeGainApp:
         main.pack(side="left", fill="both", expand=True)
         self._build_main(main)
 
-        self.status_label = tk.Label(self.root, text="", bg=BG, fg=TEXT_LO, font=FONT, anchor="w")
-        self.status_label.pack(fill="x", padx=16, pady=(0, 8))
+        bottom = tk.Frame(self.root, bg=BG)
+        bottom.pack(fill="x", padx=16, pady=(0, 8))
+        self._button(bottom, "Save diagnostics…", self._on_save_diagnostics).pack(
+            side="right")
+        self.status_label = tk.Label(bottom, text="", bg=BG, fg=TEXT_LO, font=FONT,
+                                     anchor="w", justify="left", wraplength=620)
+        self.status_label.pack(side="left", fill="x", expand=True)
 
     def _build_audio_row(self):
         row = tk.Frame(self.root, bg=BG)
@@ -294,8 +309,29 @@ class FreeGainApp:
         self.vocal_box.bind("<<ComboboxSelected>>", lambda _e: self._on_channels_changed())
         self.reference_box.bind("<<ComboboxSelected>>", lambda _e: self._on_channels_changed())
 
+        tk.Label(parent, text="Room echo tail", bg=PANEL, fg=TEXT_LO,
+                 font=FONT).pack(anchor="w", **pad)
+        self.tail_box = ttk.Combobox(
+            parent, state="readonly",
+            values=[f"{ms} ms" + {40: " (small room)", 85: " (typical)", 170: " (large hall)",
+                                   340: " (very live)"}[ms] for ms in TAIL_OPTIONS_MS])
+        self.tail_box.current(TAIL_OPTIONS_MS.index(self.config["tail_ms"]))
+        self.tail_box.pack(fill="x", padx=12)
+        self.tail_box.bind("<<ComboboxSelected>>", lambda _e: self._on_tail_changed())
+
+        self.auto_delay_var = tk.BooleanVar(value=bool(self.config["auto_delay"]))
+        tk.Checkbutton(parent, text="Find speaker delay automatically",
+                       variable=self.auto_delay_var, command=self._on_auto_delay_changed,
+                       bg=PANEL, fg=TEXT_HI, selectcolor=BG, activebackground=PANEL,
+                       activeforeground=TEXT_HI, font=FONT, anchor="w",
+                       wraplength=190, justify="left").pack(fill="x", padx=8, pady=(6, 0))
+        self.delay_label = tk.Label(parent, text="Speaker delay: measuring…", bg=PANEL,
+                                    fg=TEXT_LO, font=FONT, anchor="w", justify="left",
+                                    wraplength=190)
+        self.delay_label.pack(fill="x", padx=12)
+
         tk.Button(parent, text="Relearn room", command=self._on_relearn, bg=BG, fg=TEXT_HI,
-                  relief="flat", activebackground=LINE).pack(fill="x", padx=12, pady=(20, 6))
+                  relief="flat", activebackground=LINE).pack(fill="x", padx=12, pady=(14, 6))
 
         self.panic_btn = tk.Button(parent, text="Panic mute",
                                    command=self._on_panic, bg=PANIC_BG, fg=RED,
@@ -377,6 +413,7 @@ class FreeGainApp:
         outputs = [(None, DEFAULT_DEVICE_LABEL)] + [
             (i, f"{name} [{api}] ({outs} out)") for i, name, api, _ins, outs in devices if outs > 0]
         self._input_choices, self._output_choices = inputs, outputs
+        self.devices = devices
         self.input_box.configure(values=[label for _i, label in inputs])
         self.output_box.configure(values=[label for _i, label in outputs])
         self.input_box.current(self._choice_index(inputs, self.config["input_device"]))
@@ -571,12 +608,42 @@ class FreeGainApp:
         else:
             self.panic_btn.config(bg=PANIC_BG, fg=RED, text="Panic mute")
 
+    def _on_tail_changed(self):
+        tail = TAIL_OPTIONS_MS[self.tail_box.current()]
+        self.config["tail_ms"] = tail
+        self.engine.set_tail_ms(tail)
+
+    def _on_auto_delay_changed(self):
+        enabled = bool(self.auto_delay_var.get())
+        self.config["auto_delay"] = enabled
+        self.engine.set_auto_delay(enabled)
+
+    def _on_save_diagnostics(self):
+        report = diagnostics.build_report(
+            self.engine, self.console, self.config, self.devices, self.messages)
+        path = filedialog.asksaveasfilename(
+            title="Save FreeGain diagnostics",
+            initialdir=str(diagnostics.default_folder()),
+            initialfile=diagnostics.default_filename(),
+            defaultextension=".json",
+            filetypes=[("Diagnostics report", "*.json"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            saved = diagnostics.write_report(report, path)
+        except OSError as exc:
+            messagebox.showerror("Save diagnostics", f"Couldn't save the report:\n{exc}")
+            return
+        self._set_status(f"Diagnostics saved to {saved}")
+
     def _on_gate_change(self):
         self.engine.set_gate_threshold_db(self.threshold_var.get())
         self.engine.set_gate_timing(self.attack_var.get(), self.release_var.get())
 
     def _set_status(self, text: str):
         self.status_label.config(text=text)
+        self.messages.append((time.strftime("%H:%M:%S"), text))
+        del self.messages[:-200]
 
     # ---------- Periodic updates ----------
 
@@ -589,12 +656,26 @@ class FreeGainApp:
         self.output_meter.set_level(level_to_meter(engine.last_output_peak))
         depth = engine.last_cancellation_depth_db if self.engaged else 0.0
         self.depth_meter.set_level(depth / 30.0)
-        self.depth_label.config(text=f"Cancellation depth: {depth:.1f} dB"
-                                     + (f"   •   dropouts: {engine.xrun_count}"
-                                        if engine.xrun_count else ""))
+        extra = f"   •   CPU {100 * engine.cpu_load:.0f}%" if engine.running else ""
+        if engine.xrun_count:
+            extra += f"   •   dropouts: {engine.xrun_count}"
+        self.depth_label.config(text=f"Cancellation depth: {depth:.1f} dB{extra}")
+        self._update_delay_label()
         self.vocal_dot.set_active(engine.last_input_peak > ACTIVITY_THRESHOLD)
         self.reference_dot.set_active(engine.last_reference_peak > ACTIVITY_THRESHOLD)
         self.root.after(33, self._schedule_ui_refresh)  # ~30fps
+
+    def _update_delay_label(self):
+        engine = self.engine
+        measured = engine.delay_estimator.delay_ms
+        if not engine.auto_delay:
+            text = "Speaker delay: off"
+        elif measured is None:
+            text = "Speaker delay: measuring… (needs music)"
+        else:
+            text = f"Speaker delay: {measured:.1f} ms"
+        if self.delay_label.cget("text") != text:
+            self.delay_label.config(text=text)
 
     def on_close(self):
         self.config.update(

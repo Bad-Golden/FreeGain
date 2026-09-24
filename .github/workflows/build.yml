@@ -96,6 +96,21 @@ jobs:
           fi
           cat smoke/app-output.txt
 
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force smoke\unzipped | Out-Null
+          Expand-Archive FreeGain-Windows.zip -DestinationPath smoke\unzipped
+          $p = Start-Process -FilePath smoke\unzipped\FreeGain.exe -PassThru
+          Start-Sleep -Seconds 25
+          if ($p.HasExited) {
+            Write-Output "RESULT: FreeGain.exe exited early with code $($p.ExitCode)"
+            exit 1
+          }
+          Write-Output "RESULT: FreeGain.exe still running after 25s"
+          Stop-Process -Id $p.Id -Force
+
       - name: Upload smoke test results (macOS)
         if: always() && runner.os == 'macOS'
         uses: actions/upload-artifact@v4
