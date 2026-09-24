@@ -32,6 +32,7 @@ import numpy as np
 from delay_estimator import DelayEstimator
 from fdaf_filter import PartitionedFDAF
 from freq_shift import FrequencyShifter
+from levels import GainRamp, soft_limit
 from pem_filter import PEMFDAF
 from nlms_filter import cancellation_depth_db
 from simple_gate import SimpleGate
@@ -116,6 +117,14 @@ class AudioEngine:
         self.last_reference_peak = 0.0
         self.last_cancellation_depth_db = 0.0
         self.xrun_count = 0
+
+        # Level controls. Mic gain is applied *after* the echo canceller (so
+        # changing it never forces a relearn) and before the gate; output
+        # level is the final fader, followed by a soft limiter.
+        self.mic_gain = GainRamp(0.0)
+        self.output_gain = GainRamp(0.0)
+        self.limiting = False          # limiter touched the last block
+        self.limited_blocks = 0
         self.blocks_processed = 0
 
         # Diagnostics: CPU load of the audio callback and per-second history.
@@ -234,6 +243,12 @@ class AudioEngine:
         """Shift FreeGain's output up by `hz` (0 = off). Applied next block."""
         self._pending_shift = max(0.0, float(hz))
 
+    def set_mic_gain_db(self, db: float):
+        self.mic_gain.set_db(db)
+
+    def set_output_gain_db(self, db: float):
+        self.output_gain.set_db(db)
+
     def set_gate_threshold_db(self, threshold_db: float):
         self.gate.set_threshold_db(threshold_db)
 
@@ -280,21 +295,27 @@ class AudioEngine:
         self.delay_estimator.push(reference, mic)
         delayed_ref = self._delay_reference(reference)
 
+        mic_gain = self.mic_gain.current
         if self.engaged:
             residual = self.filter.process(delayed_ref, mic)
-            out = self.gate.process_block(residual)
+            out = self.gate.process_block(self.mic_gain.apply(residual))
             if self.shifter is not None:
                 out = self.shifter.process(out)
             depth = cancellation_depth_db(mic, residual)
         else:
-            out = mic
+            # Bypass keeps the same level controls, so A/B comparisons are fair.
+            out = self.mic_gain.apply(mic)
             depth = 0.0
+        out, self.limiting = soft_limit(self.output_gain.apply(out))
+        if self.limiting:
+            self.limited_blocks += 1
 
         outdata[:, 0] = np.clip(out, -1.0, 1.0).astype(np.float32)
         if outdata.shape[1] > 1:
             outdata[:, 1:] = outdata[:, :1]
 
-        self.last_input_peak = _peak(mic)
+        # Input meter shows the mic after the mic gain, like a channel meter.
+        self.last_input_peak = _peak(mic) * max(mic_gain, self.mic_gain.current)
         self.last_output_peak = _peak(out)
         self.last_reference_peak = _peak(reference)
         self.last_cancellation_depth_db = depth
@@ -388,6 +409,9 @@ class AudioEngine:
             "cpu_load_peak_percent": round(100 * self.cpu_load_peak, 1),
             "xruns": self.xrun_count,
             "blocks_processed": self.blocks_processed,
+            "mic_gain_db": round(self.mic_gain.db, 1),
+            "output_gain_db": round(self.output_gain.db, 1),
+            "limited_blocks": self.limited_blocks,
             "gate": {"threshold_linear": self.gate.threshold_linear,
                      "attack_ms": self.gate.attack_ms, "release_ms": self.gate.release_ms},
             "history_per_second": [

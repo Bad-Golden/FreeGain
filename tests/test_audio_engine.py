@@ -146,6 +146,8 @@ def test_ui_thread_changes_while_audio_runs():
                 engine.set_gate_threshold_db(-60 + i % 50)
                 engine.set_gate_timing(1 + i % 20, 50 + i % 500)
                 engine.set_engaged(i % 7 != 0)
+                engine.set_mic_gain_db(-24 + i % 48)
+                engine.set_output_gain_db(-40 + i % 52)
                 i += 1
             except Exception as exc:  # pragma: no cover - reported below
                 errors.append(exc)
@@ -158,7 +160,7 @@ def test_ui_thread_changes_while_audio_runs():
         stop.set()
         t.join()
     assert not errors
-    assert np.all(np.isfinite(out))
+    assert np.all(np.isfinite(out)) and np.max(np.abs(out)) <= 1.0
 
 
 def test_feedback_mode_is_default_and_toggles_without_losing_learning():

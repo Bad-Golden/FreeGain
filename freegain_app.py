@@ -75,6 +75,8 @@ DEFAULT_CONFIG = {
     "gate_attack_ms": 3.0,
     "gate_release_ms": 180.0,
     "tail_ms": DEFAULT_TAIL_MS,
+    "mic_gain_db": 0.0,
+    "output_gain_db": 0.0,
     "auto_delay": True,
     "feedback_mode": True,
 }
@@ -159,8 +161,8 @@ class FreeGainApp:
         self.root.title(f"FreeGain {__version__}")
         self._set_window_icon()
         self.root.configure(bg=BG)
-        self.root.geometry("840x600")
-        self.root.minsize(780, 540)
+        self.root.geometry("840x650")
+        self.root.minsize(780, 600)
 
         self.config = load_config()
         if self.config["tail_ms"] not in TAIL_OPTIONS_MS:
@@ -368,6 +370,15 @@ class FreeGainApp:
         self.depth_meter = Meter(parent, colour=AMBER)
         self.depth_meter.pack(fill="x", pady=(0, 16))
 
+        level_row = tk.Frame(parent, bg=BG)
+        level_row.pack(fill="x", pady=(0, 12))
+        self.mic_gain_var = tk.DoubleVar(value=self.config["mic_gain_db"])
+        self.output_gain_var = tk.DoubleVar(value=self.config["output_gain_db"])
+        self._build_slider(level_row, "Mic gain", "dB", self.mic_gain_var, -24, 24,
+                           command=self._on_levels_changed, default=0.0)
+        self._build_slider(level_row, "Output level", "dB", self.output_gain_var, -40, 12,
+                           command=self._on_levels_changed, default=0.0)
+
         gate_row = tk.Frame(parent, bg=BG)
         gate_row.pack(fill="x", pady=(0, 16))
 
@@ -379,22 +390,41 @@ class FreeGainApp:
         self._build_slider(gate_row, "Attack", "ms", self.attack_var, 0.5, 50)
         self._build_slider(gate_row, "Release", "ms", self.release_var, 10, 1000)
 
-        tk.Label(parent, text="Output", bg=BG, fg=TEXT_LO, font=FONT).pack(anchor="w")
+        out_label_row = tk.Frame(parent, bg=BG)
+        out_label_row.pack(fill="x")
+        tk.Label(out_label_row, text="Output", bg=BG, fg=TEXT_LO, font=FONT).pack(side="left")
+        self.limit_label = tk.Label(out_label_row, text="LIMIT", bg=BG, fg=LINE,
+                                    font=("Segoe UI", 8, "bold"))
+        self.limit_label.pack(side="right")
+        self._limit_hold = 0
         self.output_meter = Meter(parent, colour=AMBER)
         self.output_meter.pack(fill="x")
 
-    def _build_slider(self, parent, label, unit, var, lo, hi):
+    def _build_slider(self, parent, label, unit, var, lo, hi, command=None, default=None):
         col = tk.Frame(parent, bg=BG)
         col.pack(side="left", fill="x", expand=True, padx=6)
         value_label = tk.Label(col, bg=BG, fg=TEXT_LO, font=FONT)
         value_label.pack(anchor="w")
+        command = command or self._on_gate_change
+        signed = lo < 0 < hi and unit == "dB" and default == 0.0
 
         def on_change(_=None):
-            value_label.config(text=f"{label}: {var.get():.1f} {unit}")
-            self._on_gate_change()
+            value = var.get()
+            shown = f"{value:+.1f}" if signed else f"{value:.1f}"
+            value_label.config(text=f"{label}: {shown} {unit}")
+            command()
 
-        ttk.Scale(col, from_=lo, to=hi, variable=var, orient="horizontal",
-                  command=on_change).pack(fill="x")
+        scale = ttk.Scale(col, from_=lo, to=hi, variable=var, orient="horizontal",
+                          command=on_change)
+        scale.pack(fill="x")
+        if default is not None:
+            # Double-click a level slider to snap it back to its default.
+            def reset(_event):
+                var.set(default)
+                on_change()
+                return "break"
+            scale.bind("<Double-Button-1>", reset)
+            value_label.bind("<Double-Button-1>", reset)
         on_change()
 
     @staticmethod
@@ -655,6 +685,10 @@ class FreeGainApp:
             return
         self._set_status(f"Diagnostics saved to {saved}")
 
+    def _on_levels_changed(self):
+        self.engine.set_mic_gain_db(self.mic_gain_var.get())
+        self.engine.set_output_gain_db(self.output_gain_var.get())
+
     def _on_gate_change(self):
         self.engine.set_gate_threshold_db(self.threshold_var.get())
         self.engine.set_gate_timing(self.attack_var.get(), self.release_var.get())
@@ -680,6 +714,12 @@ class FreeGainApp:
             extra += f"   •   dropouts: {engine.xrun_count}"
         self.depth_label.config(text=f"Cancellation depth: {depth:.1f} dB{extra}")
         self._update_delay_label()
+        # LIMIT lights red while the output limiter is working (held ~0.5 s
+        # so short peaks are visible).
+        self._limit_hold = 15 if engine.limiting else max(0, self._limit_hold - 1)
+        colour = RED if self._limit_hold else LINE
+        if self.limit_label.cget("fg") != colour:
+            self.limit_label.config(fg=colour)
         self.vocal_dot.set_active(engine.last_input_peak > ACTIVITY_THRESHOLD)
         self.reference_dot.set_active(engine.last_reference_peak > ACTIVITY_THRESHOLD)
         self.root.after(33, self._schedule_ui_refresh)  # ~30fps
@@ -701,6 +741,8 @@ class FreeGainApp:
             gate_threshold_db=round(self.threshold_var.get(), 1),
             gate_attack_ms=round(self.attack_var.get(), 1),
             gate_release_ms=round(self.release_var.get(), 1),
+            mic_gain_db=round(self.mic_gain_var.get(), 1),
+            output_gain_db=round(self.output_gain_var.get(), 1),
         )
         save_config(self.config)
         self.engine.stop()

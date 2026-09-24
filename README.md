@@ -150,9 +150,16 @@ python3 -m venv .venv
    groups it toggles mute group 1, so assign the channels you want silenced
    to that group. On other consoles it mutes the selected vocal channel,
    assuming console channel N comes in as input N.
-10. **Active / Bypassed** switches processing off and passes the mic through
+10. **Mic gain** (−24 to +24 dB) and **Output level** (−40 to +12 dB) set
+    the vocal level into the gate and the final level sent back to the
+    console. Mic gain is applied after the echo canceller, so changing it
+    never forces a relearn. Gain changes glide smoothly (no clicks), and a
+    soft limiter keeps the output below full scale; the **LIMIT** light
+    next to the Output meter shows when it's working. Double-click a level
+    slider to reset it to 0 dB.
+11. **Active / Bypassed** switches processing off and passes the mic through
    untouched.
-11. **Save diagnostics…** (bottom right) writes a JSON report of the session:
+12. **Save diagnostics…** (bottom right) writes a JSON report of the session:
     settings, devices, measured delay, CPU load, dropouts, and a per-second
     history of cancellation depth and levels. Send it along with test reports.
 
@@ -200,6 +207,7 @@ zero-padded numbers. The `*_values` pairs are `[unmuted, muted]`.
 | `delay_estimator.py` | Measures the speaker-to-mic delay (GCC-PHAT) on a background thread |
 | `pem_filter.py` | Feedback-mode canceller: pre-whitened (prediction error method) so it learns the room, not the singer |
 | `freq_shift.py` | Low-latency 5 Hz frequency shifter used in feedback mode |
+| `levels.py` | Smoothly-ramped gain and the soft output limiter |
 | `diagnostics.py` | Builds the "Save diagnostics" report |
 | `nlms_filter.py` | Original sample-by-sample NLMS filter (kept for reference) and the cancellation-depth helper |
 | `simple_gate.py` | Envelope gate/expander |

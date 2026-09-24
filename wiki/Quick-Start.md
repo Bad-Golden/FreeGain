@@ -42,6 +42,10 @@ input.
 Send FreeGain's output back into the console on a spare channel, and use
 that channel in your mix **instead of** the raw vocal channel.
 
+Set levels with **Mic gain** and **Output level**: aim for the Input meter
+peaking around two-thirds of the way, and keep the **LIMIT** light mostly
+off. Double-click either slider to reset it to 0 dB.
+
 ## 6. Let it learn
 
 - Make sure the button says **Active**.

@@ -31,6 +31,9 @@
 | **Active / Bypassed** | Active = processing on. Bypassed = mic passes through untouched |
 | **Input meter** | Vocal mic level, −60 to 0 dBFS |
 | **Cancellation depth** | How much the filter is removing, in dB (0–30 dB scale). Also shows the audio CPU load, and a dropout count if the computer falls behind |
+| **Mic gain** | −24 to +24 dB. Boosts or trims the vocal after echo cancelling and before the gate (so it also moves the vocal relative to the gate threshold). Changing it never forces a relearn. The Input meter shows the mic after this gain. Double-click to reset to 0 dB |
+| **Output level** | −40 to +12 dB. The final level sent back to the console. Double-click to reset to 0 dB |
+| **LIMIT** | Lights red when the soft output limiter is working (output within 1 dB of full scale). If it's on a lot, turn **Output level** down |
 | **Threshold** | Gate threshold, −60 to 0 dB. Below it the output is turned down |
 | **Attack** | How fast the gate opens, 0.5–50 ms |
 | **Release** | How fast the gate closes, 10–1000 ms |
