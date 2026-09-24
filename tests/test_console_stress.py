@@ -48,9 +48,14 @@ def test_osc_driver_survives_a_garbage_flood():
         for _ in range(3000):
             blaster.sendto(garbage(rng, int(rng.integers(1, 1500))), target)
         blaster.close()
-        # Still alive and still understanding real replies.
-        driver.request_channel_name(7)
-        assert wait_for(lambda: names.get(7) == "Vox 7")
+        # Still alive and still understanding real replies. UDP is lossy: if
+        # the flood filled the OS receive buffer the first reply can be
+        # dropped by the kernel, so ask again until it gets through.
+        deadline = time.monotonic() + 15
+        while names.get(7) != "Vox 7" and time.monotonic() < deadline:
+            driver.request_channel_name(7)
+            wait_for(lambda: names.get(7) == "Vox 7", timeout=0.5)
+        assert names.get(7) == "Vox 7"
         assert 7 in names and all(1 <= ch <= 32 for ch in names)
     finally:
         driver.disconnect()
