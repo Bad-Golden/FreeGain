@@ -24,6 +24,7 @@ vectorised numpy -- no per-sample Python loop in the audio path.
 """
 
 import math
+from functools import lru_cache
 
 import numpy as np
 
@@ -46,6 +47,19 @@ def _allpass_ir(coefficients, length: int, extra_delay: int = 0) -> np.ndarray:
     return x
 
 
+@lru_cache(maxsize=4)
+def _pair_spectra(nfft: int):
+    """The all-pass pair's spectra, computed once per FFT size. Computing the
+    impulse responses is a slow pure-Python loop (~20 ms), which must never
+    happen on the audio thread."""
+    h_i = _allpass_ir(_PATH_A, IR_LENGTH, extra_delay=1)
+    h_q = _allpass_ir(_PATH_B, IR_LENGTH)
+    HI, HQ = np.fft.rfft(h_i, nfft), np.fft.rfft(h_q, nfft)
+    HI.flags.writeable = False
+    HQ.flags.writeable = False
+    return HI, HQ
+
+
 class FrequencyShifter:
     def __init__(self, shift_hz: float, sample_rate: float, block_size: int = 512):
         self.sample_rate = float(sample_rate)
@@ -54,11 +68,8 @@ class FrequencyShifter:
         self._phase = 0.0
         # Path A carries the extra one-sample delay; the two outputs are then
         # 90 degrees apart (I and Q of the analytic signal).
-        h_i = _allpass_ir(_PATH_A, IR_LENGTH, extra_delay=1)
-        h_q = _allpass_ir(_PATH_B, IR_LENGTH)
         self._nfft = 1 << int(math.ceil(math.log2(IR_LENGTH + block_size)))
-        self._HI = np.fft.rfft(h_i, self._nfft)
-        self._HQ = np.fft.rfft(h_q, self._nfft)
+        self._HI, self._HQ = _pair_spectra(self._nfft)
         self._history = np.zeros(IR_LENGTH - 1)
 
     def set_shift(self, shift_hz: float):

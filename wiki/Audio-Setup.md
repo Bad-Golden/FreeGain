@@ -45,6 +45,45 @@ driver** is separate:
 If your console already shows up in a recording program (DAW), you
 already have the driver.
 
+## Dante networks
+
+FreeGain works with Dante, through a Dante "soundcard" on the computer.
+It doesn't speak the Dante protocol itself, and it doesn't need to:
+
+1. **The console needs Dante.** Either it's built in (Yamaha CL/QL/DM7/
+   Rivage, Allen & Heath Avantis with a Dante card, many others), or it
+   comes from an expansion card (e.g. Behringer/Midas X-DANTE for X32/M32,
+   Allen & Heath's Dante cards for SQ/dLive, Yamaha TF with a Dante card).
+2. **Put the computer on the Dante network:** an Ethernet cable to the
+   Dante switch or the console's Dante port. Use the primary network, and
+   wired, not Wi-Fi.
+3. **Install a Dante soundcard on the computer.** Two options:
+   - **Dante Virtual Soundcard (DVS)** from Audinate. It's paid, and it makes
+     the computer a Dante device with up to 64 channels in and out. It shows
+     up in FreeGain as **[ASIO] Dante Virtual Soundcard** on Windows, or
+     **[Core Audio] Dante Virtual Soundcard** on Mac.
+   - A **Dante-to-USB adapter** (e.g. Audinate AVIO USB) plugged into the
+     computer. It shows up as a normal USB audio device, with no software
+     licence needed.
+4. **Route the channels in Dante Controller** (free from Audinate):
+   - console's vocal channel direct out → computer receive channel, e.g. 1
+   - console's Main LR (or the monitor mix you're fighting) → computer
+     receive channel, e.g. 2
+   - computer transmit channel 1 (FreeGain's output) → a spare console input
+5. **In FreeGain:** pick the Dante device in **Audio in / out**, set
+   **Vocal mic input** = 1 and **Reference** = 2, and press **Apply**.
+
+Tips:
+- **Keep latency low.** In DVS, pick the lowest latency that runs without
+  dropouts (e.g. 4 ms, or 1–2 ms on a dedicated network). The Dante
+  latency adds to the feedback loop; FreeGain's automatic delay finder
+  compensates for it, but lower is still better.
+- **Sample rate:** set DVS to the same rate as the console (usually 48 kHz).
+  FreeGain uses whatever rate the device runs at.
+- **Console connection** (names, panic mute) goes over the console's
+  *control* network port, which is often separate from the Dante port.
+  Check your console's manual; FreeGain needs the control IP address.
+
 ## Routing the reference signal
 
 The reference should be **exactly what feeds the speakers causing the
@@ -68,6 +107,7 @@ both.
 ## Latency
 
 Audio is processed in blocks of 512 samples, about 10.7 ms at 48 kHz, plus
-the interface's own buffering. That's fine for speech and most singing. If
+the interface's own buffering (1024 samples at 88.2/96 kHz: the same
+~10.7 ms). That's fine for speech and most singing. If
 the **dropouts** counter next to Cancellation depth keeps climbing, the
 computer can't keep up; see [[Troubleshooting]].

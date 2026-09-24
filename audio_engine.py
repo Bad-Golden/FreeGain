@@ -47,6 +47,17 @@ DELAY_MARGIN_MS = 5.0        # start the filter this much before the direct soun
 DELAY_CHANGE_MS = 2.0        # ignore estimate changes smaller than this
 FILTER_BLOCK = 256
 
+
+def filter_block_for(sample_rate: float) -> int:
+    """
+    Canceller block size. At 88.2/96 kHz twice as many samples arrive per
+    second, so blocks twice as long keep the number of FFT rounds (and the
+    CPU load) about the same as at 44.1/48 kHz -- measured: feedback mode
+    at 96 kHz went from 2.1x to ~4x real time. The engine's 512-sample
+    audio blocks are a multiple of both sizes, so no latency is added.
+    """
+    return FILTER_BLOCK * 2 if sample_rate > 64000 else FILTER_BLOCK
+
 # Feedback mode: the processed vocal goes back out of the PA, so the loop is
 # closed. Uses the prediction-error-method filter (learns the room, not the
 # singer), a small frequency shift on the output to decorrelate the loop,
@@ -81,7 +92,8 @@ class AudioEngine:
         # either fails to open or makes the OS resample behind our back.
         self.requested_sample_rate = sample_rate
         self.sample_rate = float(sample_rate or 48000)
-        self.block_size = block_size
+        self.base_block_size = block_size
+        self.block_size = self._block_for(self.sample_rate)
         self.tail_ms = float(tail_ms)
         self.feedback_mode = bool(feedback_mode)
         self.filter = self._make_filter()
@@ -93,7 +105,10 @@ class AudioEngine:
         # Output frequency shift (Hz) against closed-loop feedback; 0 = off.
         self.shift_hz = 0.0
         self.shifter = None
-        self._pending_shift = FEEDBACK_SHIFT_HZ if self.feedback_mode else None
+        self._pending_shift = None
+        if self.feedback_mode:
+            self.shift_hz = FEEDBACK_SHIFT_HZ
+            self.shifter = FrequencyShifter(FEEDBACK_SHIFT_HZ, self.sample_rate, self.block_size)
 
         self.mic_channel = 0
         self.reference_channel = 1
@@ -198,9 +213,16 @@ class AudioEngine:
             stream.stop()
             stream.close()
 
+    def _block_for(self, rate: float) -> int:
+        # Keep the audio block ~10.7 ms long at any rate: 512 samples at
+        # 44.1/48 kHz, 1024 at 88.2/96 kHz. Same latency, half the per-block
+        # overhead at high rates (5.3 ms blocks were occasionally overrun).
+        return self.base_block_size * (2 if rate > 64000 else 1)
+
     def set_sample_rate(self, rate: float):
         """Rebuild everything that depends on the sample rate (stream stopped)."""
         self.sample_rate = float(rate)
+        self.block_size = self._block_for(self.sample_rate)
         self.gate.set_sample_rate(self.sample_rate)
         self.gate.reset()
         self.filter = self._make_filter()
@@ -237,11 +259,17 @@ class AudioEngine:
         what the filter has learned; applied next block."""
         self.feedback_mode = bool(enabled)
         self._pending_filter = self._make_filter()
-        self._pending_shift = FEEDBACK_SHIFT_HZ if enabled else 0.0
+        self._queue_shift(FEEDBACK_SHIFT_HZ if enabled else 0.0)
 
     def set_frequency_shift(self, hz: float):
         """Shift FreeGain's output up by `hz` (0 = off). Applied next block."""
-        self._pending_shift = max(0.0, float(hz))
+        self._queue_shift(max(0.0, float(hz)))
+
+    def _queue_shift(self, hz: float):
+        # Build the shifter here, on the caller's (UI) thread; the audio
+        # thread only swaps it in, so it never stalls a block.
+        shifter = FrequencyShifter(hz, self.sample_rate, self.block_size) if hz else None
+        self._pending_shift = (hz, shifter)
 
     def set_mic_gain_db(self, db: float):
         self.mic_gain.set_db(db)
@@ -262,9 +290,9 @@ class AudioEngine:
     def _make_filter(self) -> PartitionedFDAF:
         taps = int(self.tail_ms / 1000.0 * self.sample_rate)
         if self.feedback_mode:
-            return PEMFDAF(filter_length=taps, block_size=FILTER_BLOCK,
+            return PEMFDAF(filter_length=taps, block_size=filter_block_for(self.sample_rate),
                            step_size=FEEDBACK_STEP, sample_rate=self.sample_rate)
-        return PartitionedFDAF(filter_length=taps, block_size=FILTER_BLOCK,
+        return PartitionedFDAF(filter_length=taps, block_size=filter_block_for(self.sample_rate),
                                step_size=SPILL_STEP)
 
     # ---------- Audio thread ----------
@@ -332,14 +360,14 @@ class AudioEngine:
             self.filter.reset()
             self.gate.reset()
         if self._pending_shift is not None:
-            hz, self._pending_shift = self._pending_shift, None
+            (hz, shifter), self._pending_shift = self._pending_shift, None
             self.shift_hz = hz
-            if hz == 0.0:
+            if shifter is None:
                 self.shifter = None
             elif self.shifter is None:
-                self.shifter = FrequencyShifter(hz, self.sample_rate, self.block_size)
+                self.shifter = shifter
             else:
-                self.shifter.set_shift(hz)
+                self.shifter.set_shift(hz)   # keep its history: no click
 
         if self.auto_delay:
             measured = self.delay_estimator.delay_samples

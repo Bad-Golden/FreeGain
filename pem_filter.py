@@ -25,7 +25,7 @@ import numpy as np
 from fdaf_filter import PartitionedFDAF
 
 LPC_ORDER = 20
-HISTORY = 2048            # samples of error history the source model is fit on
+HISTORY = 2048            # error history the source model is fit on, at 44.1/48 kHz
 PITCH_MIN_MS, PITCH_MAX_MS = 2.5, 20.0
 
 
@@ -51,6 +51,10 @@ class PEMFDAF(PartitionedFDAF):
         self.sample_rate = float(sample_rate)
         self.pitch_min = int(PITCH_MIN_MS / 1000 * sample_rate)
         self.pitch_max = int(PITCH_MAX_MS / 1000 * sample_rate)
+        # Same duration at 88.2/96 kHz (twice the samples), so it still spans
+        # two periods of the lowest pitch. Tuned at 2048 @ 48 kHz: a longer
+        # window reacts too slowly to the voice (closed-loop test drops).
+        self.history = HISTORY * (2 if sample_rate > 64000 else 1)
         super().__init__(filter_length, block_size, step_size, regularization)
 
     def reset(self):
@@ -60,11 +64,11 @@ class PEMFDAF(PartitionedFDAF):
         self.power_w = np.zeros(n_bins)
         keep = self.pitch_max + LPC_ORDER + self.N + 1
         self._x_hist = np.zeros(keep)
-        self._e_hist = np.zeros(max(keep, HISTORY))
+        self._e_hist = np.zeros(max(keep, self.history))
         self.xw_prev = np.zeros(self.N)
         self.pitch_lag = 0
         self.pitch_gain = 0.0
-        self._window = np.hanning(HISTORY)
+        self._window = np.hanning(self.history)
         self._model = None
         self._fit_count = 0
 
@@ -82,18 +86,21 @@ class PEMFDAF(PartitionedFDAF):
         Fit the source model to the recent error. Returns (a, lag, gain):
         the whitening filter is A(z) * (1 - gain * z^-lag).
         """
-        seg = self._e_hist[-HISTORY:] * self._window
+        H = self.history
+        seg = self._e_hist[-H:] * self._window
         if float(np.dot(seg, seg)) < 1e-12:
             return np.array([1.0]), 0, 0.0
-        spec = np.fft.rfft(seg, 2 * HISTORY)
-        r = np.fft.irfft(np.abs(spec) ** 2)[: LPC_ORDER + 1]
+        # Only 21 autocorrelation lags are needed: direct dot products are
+        # cheaper than an FFT of twice the history length.
+        r = np.array([np.dot(seg[: H - k], seg[k:]) for k in range(LPC_ORDER + 1)])
         r[0] *= 1.0 + 1e-4                     # white-noise correction for stability
         a = _levinson(r, LPC_ORDER)
         # Long-term (pitch) predictor on the LPC residual.
-        resid = np.convolve(self._e_hist[-HISTORY:], a)[LPC_ORDER:HISTORY]
+        resid = np.convolve(self._e_hist[-H:], a)[LPC_ORDER:H]
         n = len(resid)
-        spec = np.fft.rfft(resid, 2 * n)
-        ac = np.fft.irfft(np.abs(spec) ** 2)[: self.pitch_max + 1]
+        nfft = 1 << int(np.ceil(np.log2(2 * n)))   # power of two: much faster FFT
+        spec = np.fft.rfft(resid, nfft)
+        ac = np.fft.irfft(np.abs(spec) ** 2, nfft)[: self.pitch_max + 1]
         lags = ac[self.pitch_min:self.pitch_max + 1]
         lag = int(np.argmax(lags)) + self.pitch_min
         gain = float(ac[lag] / (ac[0] + 1e-20))

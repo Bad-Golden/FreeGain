@@ -38,7 +38,7 @@ LATENCY_BLOCKS = 2        # console + USB round trip on top of the block itself
 def run_loop(gain: float, h: np.ndarray, seconds: float, engaged: bool,
              backing: np.ndarray = None, seed: int = 0, freq_shift_hz: float = 0.0,
              source: str = "singing", warmup_s: float = 0.0, warmup_gain: float = 0.0,
-             step: float = None):
+             step: float = None, automation=None):
     """
     Return (output, clean singer) for a loop with the given console gain.
 
@@ -66,6 +66,8 @@ def run_loop(gain: float, h: np.ndarray, seconds: float, engaged: bool,
     for i in range(0, n, BLOCK):
         # What the PA plays now: FreeGain's output from LATENCY_BLOCKS ago x gain.
         g = warmup_gain if i < warmup_s * FS else gain
+        if automation is not None:
+            automation(engine, i / FS)     # e.g. ride the Output level slider
         spk = g * out_queue.pop(0)
         if backing is not None:
             spk = spk + backing[i:i + BLOCK]
