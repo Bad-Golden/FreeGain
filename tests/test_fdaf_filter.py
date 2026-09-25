@@ -155,13 +155,18 @@ def test_long_run_is_stable():
 
 @pytest.mark.parametrize("tail_ms,min_speed", [(40, 8), (85, 5), (170, 3), (340, 1.5)])
 def test_runs_faster_than_real_time(tail_ms, min_speed):
-    f = PartitionedFDAF(int(tail_ms / 1000 * FS))
     x = music(3)
     d = echo(x, room(5, 30))
-    start = time.perf_counter()
-    for i in range(0, len(x), 512):
-        f.process(x[i:i + 512], d[i:i + 512])
-    speed = 3.0 / (time.perf_counter() - start)
+    # Best of three runs: measures the code, not a stall of a shared CI
+    # machine (a single run once came in at 4.6x on a macOS runner).
+    best = float("inf")
+    for _ in range(3):
+        f = PartitionedFDAF(int(tail_ms / 1000 * FS))
+        start = time.perf_counter()
+        for i in range(0, len(x), 512):
+            f.process(x[i:i + 512], d[i:i + 512])
+        best = min(best, time.perf_counter() - start)
+    speed = 3.0 / best
     assert speed > min_speed, f"{tail_ms} ms tail only {speed:.1f}x real time"
 
 
