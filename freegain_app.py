@@ -397,6 +397,7 @@ class FreeGainApp:
                                     font=("Segoe UI", 8, "bold"))
         self.limit_label.pack(side="right")
         self._limit_hold = 0
+        self._same_signal_shown = False
         self.output_meter = Meter(parent, colour=AMBER)
         self.output_meter.pack(fill="x")
 
@@ -712,6 +713,14 @@ class FreeGainApp:
         extra = f"   •   CPU {100 * engine.cpu_load:.0f}%" if engine.running else ""
         if engine.xrun_count:
             extra += f"   •   dropouts: {engine.xrun_count}"
+        if engine.same_signal and self.engaged:
+            extra += "   •   ⚠ mic and reference are the same signal: check routing"
+        if engine.same_signal != self._same_signal_shown:
+            self._same_signal_shown = engine.same_signal
+            self._set_status(
+                "Mic and reference inputs carry the same signal, so cancelling would "
+                "silence the vocal. Passing it through. Pick the speaker feed as Reference."
+                if engine.same_signal else "Mic and reference differ again: cancelling.")
         self.depth_label.config(text=f"Cancellation depth: {depth:.1f} dB{extra}")
         self._update_delay_label()
         # LIMIT lights red while the output limiter is working (held ~0.5 s

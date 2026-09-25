@@ -54,7 +54,18 @@ see all channels, or install the console's driver (see [[Audio Setup]]).
   cancel.
 - Vocal and Reference must be **different** inputs.
 
+**"⚠ mic and reference are the same signal: check routing"**
+The Vocal mic and Reference inputs carry the same audio: the same input
+number picked twice, or the same source patched to both (easy to do in a
+Dante or USB routing matrix). Cancelling would remove the singer
+completely, so FreeGain passes the vocal through untouched until it's
+fixed. Set **Reference** to the feed of the speakers causing the feedback.
+FreeGain goes back to cancelling by itself about a second later.
+
 **Cancellation depth is low (under ~10 dB)**
+- Just pressed **Relearn room**, or moved? In feedback mode FreeGain learns
+  slowly on purpose (so it never learns the singer): give it 5–10 s of
+  music.
 - Check **Speaker delay** in the left panel. If it keeps saying
   "measuring…", the reference and mic don't share enough sound: play music
   through the speakers, and check the Reference is the feed those speakers

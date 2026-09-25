@@ -65,6 +65,9 @@ def filter_block_for(sample_rate: float) -> int:
 # +6 dB of extra usable gain before feedback with pitched singing, with the
 # voice as clean as bypass at normal gain.
 FEEDBACK_SHIFT_HZ = 5.0
+# Deliberately slow: ~3-8 s of music to learn a room from scratch. Any
+# faster start (larger step, or a spill-style warm-up) was tried and cut
+# voice quality at normal gain from ~24 dB to 6-9 dB in the closed loop.
 FEEDBACK_STEP = 0.1
 # Spill mode (feedback mode off): the reference never contains the vocal,
 # e.g. a band or playback bleeding into a mic. The plain filter learns fast.
@@ -141,6 +144,14 @@ class AudioEngine:
         self.limiting = False          # limiter touched the last block
         self.limited_blocks = 0
         self.blocks_processed = 0
+
+        # Routing check: if the mic and reference carry the same signal
+        # (same channel picked twice, or the same source patched to both),
+        # cancelling would silence the singer. Pass the vocal through instead
+        # and tell the operator.
+        self.same_signal = False
+        self._same_run = 0.0          # seconds the two have matched
+        self._differ_run = 0.0        # seconds they've differed since then
 
         # Diagnostics: CPU load of the audio callback and per-second history.
         self.cpu_load = 0.0          # smoothed: processing time / block duration
@@ -323,8 +334,13 @@ class AudioEngine:
         self.delay_estimator.push(reference, mic)
         delayed_ref = self._delay_reference(reference)
 
+        self._check_routing(mic, reference)
+
         mic_gain = self.mic_gain.current
-        if self.engaged:
+        if self.engaged and self.same_signal:
+            out = self.mic_gain.apply(mic)
+            depth = 0.0
+        elif self.engaged:
             residual = self.filter.process(delayed_ref, mic)
             out = self.gate.process_block(self.mic_gain.apply(residual))
             if self.shifter is not None:
@@ -384,6 +400,36 @@ class AudioEngine:
                 self.filter.reset()
             self._pending_delay = None
 
+    SAME_CORRELATION = 0.999      # zero-lag correlation that means "same signal"
+    SAME_AFTER_S = 0.5            # ...for this long before we step in
+    DIFFER_AFTER_S = 1.0          # and this long below 0.9 before we step out
+
+    def _check_routing(self, mic: np.ndarray, reference: np.ndarray):
+        mm = float(np.dot(mic, mic))
+        rr = float(np.dot(reference, reference))
+        n = len(mic)
+        if mm < 1e-8 * n or rr < 1e-8 * n:
+            return                        # silence proves nothing either way
+        corr = float(np.dot(mic, reference)) / np.sqrt(mm * rr)
+        dt = n / self.sample_rate
+        if corr > self.SAME_CORRELATION:
+            # A pure tone (a sound-check oscillator) through the room can line
+            # up with the reference by chance; only broadband audio proves the
+            # two are the same signal. Tonal blocks are neutral evidence.
+            spec = np.abs(np.fft.rfft(mic)) ** 2
+            if np.sort(spec)[-4:].sum() > 0.9 * spec.sum():
+                return
+            self._same_run += dt
+            self._differ_run = 0.0
+            if self._same_run >= self.SAME_AFTER_S:
+                self.same_signal = True
+        else:
+            self._same_run = 0.0
+            if corr < 0.9:
+                self._differ_run += dt
+                if self._differ_run >= self.DIFFER_AFTER_S:
+                    self.same_signal = False
+
     def _delay_reference(self, reference: np.ndarray) -> np.ndarray:
         n = len(reference)
         buf = np.concatenate([self._ref_history, reference])
@@ -440,6 +486,7 @@ class AudioEngine:
             "mic_gain_db": round(self.mic_gain.db, 1),
             "output_gain_db": round(self.output_gain.db, 1),
             "limited_blocks": self.limited_blocks,
+            "mic_and_reference_same_signal": self.same_signal,
             "gate": {"threshold_linear": self.gate.threshold_linear,
                      "attack_ms": self.gate.attack_ms, "release_ms": self.gate.release_ms},
             "history_per_second": [

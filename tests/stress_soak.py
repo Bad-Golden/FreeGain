@@ -124,15 +124,18 @@ def main():
     wall_start = time.perf_counter()
     rows = []
     seen_changes = 0
+    # Feedback mode learns deliberately slowly (a faster start measurably
+    # damages the voice in a closed loop), so allow it longer to re-learn.
+    relearn_segs = 6 if args.mode == "feedback" else 3
     for k, x, mic, voice, echo_only, events in make_show(args.minutes, args.seed):
         if "mic moved" in events or "speaker delay now 70 ms" in events:
-            settled_after = k + 4  # give it 20 s to re-learn
+            settled_after = k + relearn_segs + 1
         elif k == 0:
             settled_after = 4
         if rng.random() < 0.03:
             engine.trigger_relearn()
             events.append("operator pressed Relearn")
-            settled_after = k + 3
+            settled_after = k + relearn_segs
         if rng.random() < 0.05:
             tail = float(rng.choice([40, 85, 170, 340]))
             engine.set_tail_ms(tail)
