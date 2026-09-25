@@ -55,3 +55,22 @@ def test_riding_the_output_level_up():
     """Output level sits inside the feedback loop: pushing it up is how
     howling starts. FreeGain must allow clearly more before it does."""
     assert _howl_level_while_riding(True) >= _howl_level_while_riding(False) + 5
+
+
+def _holds(delay_ms, tail_ms, rel_db):
+    """Soundcheck at -12 dB, then run rel_db above the room's howl point."""
+    h = room(delay_ms, tail_ms, seed=11)
+    m = msg_linear(h)
+    out, s = run_loop(m * 10 ** (rel_db / 20), h, 12, True, seed=1,
+                      warmup_s=10, warmup_gain=m * 10 ** (-12 / 20))
+    return not howled(out, s) and voice_quality_db(out, s, FEEDBACK_SHIFT_HZ) >= 6
+
+
+def test_normal_room_wedge_holds_nine_db_above_the_limit():
+    # Guards the fast start: a version that kept the fast step on while the
+    # singer dominated managed only +3 dB here (+12 dB is typical).
+    assert _holds(9, 60, +9)
+
+
+def test_hall_mains_holds_six_db_above_the_limit():
+    assert _holds(20, 150, +6)

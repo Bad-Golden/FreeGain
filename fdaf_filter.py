@@ -155,6 +155,39 @@ class PartitionedFDAF:
         self.x_prev = other.x_prev.copy()
         self.power = other.power.copy()
 
+    def shift_taps(self, delta: int, reference_history=None):
+        """
+        The reference's bulk delay grew by `delta` samples (negative: shrank).
+        Move the learned room response to match instead of forgetting it:
+        the room hasn't changed, only where it sits relative to the delayed
+        reference. `reference_history` is the recent reference re-delayed
+        for the new alignment (ending with the last block processed); the
+        filter's input history is rebuilt from it so the prediction carries
+        on without a gap. Without it, the history is cleared and refills
+        within one filter length.
+        """
+        N, K = self.N, self.K
+        taps = np.fft.irfft(self.W, n=2 * N, axis=1)[:, :N].reshape(-1)
+        moved = np.zeros_like(taps)
+        if delta >= 0:
+            moved[:len(taps) - delta] = taps[delta:]
+        else:
+            moved[-delta:] = taps[:len(taps) + delta]
+        padded = np.zeros((K, 2 * N))
+        padded[:, :N] = moved.reshape(K, N)
+        self.W = np.fft.rfft(padded, axis=1)
+        need = (K + 1) * N
+        if reference_history is not None and not self._buffered \
+                and len(reference_history) >= need:
+            h = np.asarray(reference_history[-need:], dtype=np.float64)
+            for k in range(K):
+                end = len(h) - k * N
+                self.X[k] = np.fft.rfft(h[end - 2 * N:end])
+            self.x_prev = h[-N:].copy()
+        else:
+            self.X[:] = 0
+            self.x_prev[:] = 0
+
     # Same name as the old NLMSFilter so callers can swap filters.
     process_block = process
 

@@ -65,9 +65,8 @@ def filter_block_for(sample_rate: float) -> int:
 # +6 dB of extra usable gain before feedback with pitched singing, with the
 # voice as clean as bypass at normal gain.
 FEEDBACK_SHIFT_HZ = 5.0
-# Deliberately slow: ~3-8 s of music to learn a room from scratch. Any
-# faster start (larger step, or a spill-style warm-up) was tried and cut
-# voice quality at normal gain from ~24 dB to 6-9 dB in the closed loop.
+# Careful long-term step. The filter starts faster (see pem_filter.WARM_STEP)
+# and eases down to this.
 FEEDBACK_STEP = 0.1
 # Spill mode (feedback mode off): the reference never contains the vocal,
 # e.g. a band or playback bleeding into a mic. The plain filter learns fast.
@@ -393,11 +392,18 @@ class AudioEngine:
         if self._pending_delay is not None:
             change = abs(self._pending_delay - self.bulk_delay)
             if change > DELAY_CHANGE_MS / 1000 * self.sample_rate:
-                # The learned taps are aligned to the old delay; start over.
                 old_ms = self.bulk_delay_ms
+                delta = self._pending_delay - self.bulk_delay
                 self.bulk_delay = self._pending_delay
                 self.delay_changes.append((time.time(), old_ms, self.bulk_delay_ms))
-                self.filter.reset()
+                if abs(delta) < self.filter.filter_length // 2:
+                    # Same room, re-aligned (e.g. the delay was just found at
+                    # startup): keep what was learned, shifted to match.
+                    end = len(self._ref_history) - self.bulk_delay
+                    self.filter.shift_taps(delta, self._ref_history[:max(0, end)])
+                else:
+                    # A big jump (moved mic, delay tower): start over.
+                    self.filter.reset()
             self._pending_delay = None
 
     SAME_CORRELATION = 0.999      # zero-lag correlation that means "same signal"

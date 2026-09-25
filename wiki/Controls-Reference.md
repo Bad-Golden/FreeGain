@@ -21,7 +21,7 @@
 | **Room echo tail** | How much room reverb the filter models: 40 ms (small room), 85 ms (typical, default), 170 ms (large hall), 340 ms (very live). Longer cancels more in echoey rooms but learns more slowly and uses a little more CPU. Changing it keeps what's been learned |
 | **Find speaker delay automatically** | Measures how late the speaker sound reaches the mic (needs music playing) and lines the signals up, so the echo tail is spent on the room, not on travel time. Handles delays up to 500 ms |
 | **Speaker delay** | The measured delay, e.g. "9.2 ms". About 3 ms per metre between speaker and mic, plus any console/USB routing delay |
-| **Relearn room** | Forgets what the filter learned, re-measures the delay and starts fresh. Use after moving mics or speakers. In feedback mode it takes 5–10 s of music to learn the room again (spill mode: about a second), so don't press it in the middle of a loud song |
+| **Relearn room** | Forgets what the filter learned, re-measures the delay and starts fresh. Use after moving mics or speakers. It locks back on within 1–2 s of music |
 | **Panic mute** | Mutes mute group 1, or the vocal channel on consoles without mute groups. Stays red while muted; click again to unmute |
 
 ## Main area

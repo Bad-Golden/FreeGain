@@ -27,6 +27,14 @@ from fdaf_filter import PartitionedFDAF
 LPC_ORDER = 20
 HISTORY = 2048            # error history the source model is fit on, at 44.1/48 kHz
 PITCH_MIN_MS, PITCH_MAX_MS = 2.5, 20.0
+# Fast start: after a reset (Relearn, a new room) learn with this larger
+# step for WARM_S seconds of music, then ease down to the careful step over
+# WARM_FADE_S. Still on the whitened gradient -- a spill-style (unwhitened)
+# fast start was tried and learned the singer: closed-loop voice quality
+# fell from 24 dB to 6-9 dB. This one leaves it unchanged, and gets to
+# 20 dB in ~1 s instead of 3-4 (stress test, tests/test_feedback_loop.py).
+WARM_STEP = 0.3
+WARM_S, WARM_FADE_S = 3.0, 1.5
 
 
 def _levinson(r: np.ndarray, order: int) -> np.ndarray:
@@ -71,6 +79,7 @@ class PEMFDAF(PartitionedFDAF):
         self._window = np.hanning(self.history)
         self._model = None
         self._fit_count = 0
+        self._learned_blocks = 0
 
     def inherit(self, other):
         super().inherit(other)
@@ -78,6 +87,17 @@ class PEMFDAF(PartitionedFDAF):
             k = min(self.K, other.K)
             self.Xw[:k] = other.Xw[:k]
             self.power_w = other.power_w.copy()
+            self._learned_blocks = other._learned_blocks
+        else:
+            self._learned_blocks = 1 << 30
+
+    def shift_taps(self, delta: int, reference_history=None):
+        super().shift_taps(delta, reference_history)
+        # The whitened history only steers learning; it refills in a moment.
+        self.Xw[:] = 0
+        self.xw_prev[:] = 0
+        if reference_history is not None and len(reference_history) >= len(self._x_hist):
+            self._x_hist = np.asarray(reference_history[-len(self._x_hist):], dtype=np.float64)
 
     # ---------- source model ----------
 
@@ -161,9 +181,17 @@ class PEMFDAF(PartitionedFDAF):
         e_energy = float(np.dot(e, e)) / N
         d_energy = float(np.dot(d, d)) / N
         y_energy = float(np.dot(y, y)) / N
-        step = self.mu * self._step_scale(e, y, e_energy, d_energy, y_energy)
+        t = self._learned_blocks * self.N / self.sample_rate
+        frac = min(1.0, max(0.0, (WARM_S + WARM_FADE_S - t) / WARM_FADE_S))
+        mu = self.mu + max(0.0, WARM_STEP - self.mu) * frac
+        step = mu * self._step_scale(e, y, e_energy, d_energy, y_energy)
 
         if float(np.dot(x, x)) > 1e-12:
+            # Plain clock time. Pausing the clock while the singer dominates
+            # (tried) keeps the fast step on in a closed loop, where the voice
+            # is always there, and it learns the singer: added gain before
+            # feedback fell from +6..+12 dB to +0..+6 dB.
+            self._learned_blocks += 1
             Ew = np.fft.rfft(np.concatenate([np.zeros(N), ew]))
             norm = step / (self.power_w + self.delta * 2 * N + 1e-12)
             G = np.conj(self.Xw) * (Ew * norm)
@@ -177,3 +205,4 @@ class PEMFDAF(PartitionedFDAF):
     def _hard_reset(self):
         super()._hard_reset()
         self.power_w[:] = 0
+        self._learned_blocks = 0

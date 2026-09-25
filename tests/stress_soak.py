@@ -124,17 +124,21 @@ def main():
     wall_start = time.perf_counter()
     rows = []
     seen_changes = 0
-    # Feedback mode learns deliberately slowly (a faster start measurably
-    # damages the voice in a closed loop), so allow it longer to re-learn.
-    relearn_segs = 6 if args.mode == "feedback" else 3
+    relearn_segs = 3   # segments allowed to re-learn after a reset
+    # Learning needs music, and pauses while someone sings: judge
+    # cancellation once there have been relearn_segs segments (15 s) of
+    # music-only since the last reset, not just 15 s of clock time.
+    music_segs = 0
     for k, x, mic, voice, echo_only, events in make_show(args.minutes, args.seed):
         if "mic moved" in events or "speaker delay now 70 ms" in events:
+            music_segs = 0
             settled_after = k + relearn_segs + 1
         elif k == 0:
             settled_after = 4
         if rng.random() < 0.03:
             engine.trigger_relearn()
             events.append("operator pressed Relearn")
+            music_segs = 0
             settled_after = k + relearn_segs
         if rng.random() < 0.05:
             tail = float(rng.choice([40, 85, 170, 340]))
@@ -170,7 +174,10 @@ def main():
         note = ""
         settled = k >= settled_after and "clipping burst" not in events \
             and not any("glitch" in e for e in events)
-        if echo_only and settled and np.mean(x[last] ** 2) > 1e-6:
+        # A 340 ms filter is 4x longer than the default and learns slower.
+        needed = relearn_segs + (1 if engine.tail_ms >= 340 else 0)
+        if echo_only and settled and music_segs >= needed \
+                and np.mean(x[last] ** 2) > 1e-6:
             # The gate may push depth higher; the filter alone must reach 20 dB.
             if depth < 20:
                 failures.append(f"segment {k}: only {depth:.1f} dB cancellation once settled")
@@ -186,6 +193,8 @@ def main():
             _, old_ms, new_ms = engine.delay_changes[seen_changes]
             events.append(f"delay {old_ms:.1f}->{new_ms:.1f} ms")
             seen_changes += 1
+        if echo_only:
+            music_segs += 1
         rows.append((k, depth, voice_db, engine.bulk_delay_ms, ", ".join(events), note))
 
     stop.set()

@@ -63,9 +63,7 @@ fixed. Set **Reference** to the feed of the speakers causing the feedback.
 FreeGain goes back to cancelling by itself about a second later.
 
 **Cancellation depth is low (under ~10 dB)**
-- Just pressed **Relearn room**, or moved? In feedback mode FreeGain learns
-  slowly on purpose (so it never learns the singer): give it 5–10 s of
-  music.
+- Just pressed **Relearn room**? Give it a couple of seconds of music.
 - Check **Speaker delay** in the left panel. If it keeps saying
   "measuring…", the reference and mic don't share enough sound: play music
   through the speakers, and check the Reference is the feed those speakers
