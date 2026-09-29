@@ -14,7 +14,29 @@ def test_loud_signal_passes_quiet_signal_attenuated():
     quiet = 0.001 * np.sin(2 * np.pi * 440 * t)
     gate.reset()
     out = gate.process_block(quiet)
-    assert np.max(np.abs(out[-1000:])) < 0.1 * np.max(np.abs(quiet))
+    ratio = np.max(np.abs(out[-1000:])) / np.max(np.abs(quiet))
+    assert 0.09 < ratio < 0.12      # down by the gate's full range, 20 dB
+
+
+def test_never_silences_only_dips_by_its_range():
+    """A too-high threshold must not cut the singer out: a signal far
+    below it is turned down by at most RANGE_DB."""
+    from simple_gate import RANGE_DB
+    for block in (True, False):
+        gate = SimpleGate(threshold_db=0.0, sample_rate=48000)
+        x = 1e-4 * np.sin(2 * np.pi * 300 * np.arange(48000) / 48000)
+        out = gate.process_block(x) if block else np.array([gate.process_sample(v) for v in x])
+        rms = lambda a: np.sqrt(np.mean(a ** 2))  # noqa: E731
+        drop_db = 20 * np.log10(rms(x[-4800:]) / rms(out[-4800:]))
+        assert drop_db <= RANGE_DB + 0.1
+
+
+def test_default_threshold_passes_normal_console_levels():
+    """Soft singing on a console USB/Dante send (-45 dBFS) is untouched."""
+    gate = SimpleGate(sample_rate=48000)
+    x = 10 ** (-45 / 20) * np.sqrt(2) * np.sin(2 * np.pi * 300 * np.arange(48000) / 48000)
+    out = gate.process_block(x)
+    assert np.allclose(out[-4800:], x[-4800:])
 
 
 @pytest.mark.parametrize("block", [512, 441, 37])

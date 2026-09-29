@@ -25,6 +25,7 @@ the travel time.
 import os
 import threading
 import time
+from typing import Optional
 from collections import deque
 
 import numpy as np
@@ -144,6 +145,16 @@ class AudioEngine:
         self.limited_blocks = 0
         self.blocks_processed = 0
 
+        # Robustness: an error while processing a block passes the vocal
+        # through instead of killing the stream (an exception in the callback
+        # makes the sound library stop the stream: silence until restarted).
+        self.callback_errors = 0
+        self.last_callback_error = ""
+        self.stream_restarts = 0
+        self._restart_pending = False
+        self._last_restart_try = 0.0
+        self._ever_started = False
+
         # Routing check: if the mic and reference carry the same signal
         # (same channel picked twice, or the same source patched to both),
         # cancelling would silence the singer. Pass the vocal through instead
@@ -201,8 +212,12 @@ class AudioEngine:
                 f"'{in_info['name']}' has {in_info['max_input_channels']} input "
                 f"channel(s), but channel {in_channels} was selected.")
 
-        rate = self.requested_sample_rate or in_info["default_samplerate"]
-        self.set_sample_rate(float(rate))
+        rate = float(self.requested_sample_rate or in_info["default_samplerate"])
+        if rate != self.sample_rate or not self._ever_started:
+            self.set_sample_rate(rate)
+        # (Same rate -- e.g. restarting after the device dropped out -- keeps
+        # what the filter has learned.)
+        self._ever_started = True
 
         stream = sd.Stream(
             device=(self.input_device, self.output_device),
@@ -217,11 +232,44 @@ class AudioEngine:
         self.delay_estimator.start()
 
     def stop(self):
+        self._restart_pending = False      # an explicit stop: don't auto-restart
         self.delay_estimator.stop()
         stream, self.stream = self.stream, None
         if stream:
-            stream.stop()
-            stream.close()
+            try:
+                stream.stop()
+                stream.close()
+            except Exception:  # a dead device can refuse to stop cleanly
+                pass
+
+    RESTART_INTERVAL_S = 2.0
+
+    def check_stream(self) -> Optional[str]:
+        """
+        Called about once a second from the UI. If the audio stream has died
+        on its own (USB hiccup, driver reset, device unplugged), restart it,
+        retrying every couple of seconds until the device is back. Returns a
+        status message when something happened, else None.
+        """
+        stream = self.stream
+        if stream is None and not self._restart_pending:
+            return None
+        if stream is not None and getattr(stream, "active", True):
+            return None
+        now = time.monotonic()
+        if now - self._last_restart_try < self.RESTART_INTERVAL_S:
+            return None
+        self._last_restart_try = now
+        self._restart_pending = True
+        try:
+            self.start()
+        except Exception as exc:
+            self.stream = None
+            self._restart_pending = True     # start() -> stop() cleared it
+            return f"Audio device stopped: reconnecting… ({exc})"
+        self._restart_pending = False
+        self.stream_restarts += 1
+        return "Audio device came back: running again."
 
     def _block_for(self, rate: float) -> int:
         # Keep the audio block ~10.7 ms long at any rate: 512 samples at
@@ -310,6 +358,20 @@ class AudioEngine:
     _pending_delay = None
 
     def _callback(self, indata, outdata, frames, time_info, status):
+        try:
+            self._process(indata, outdata, frames, status)
+        except Exception as exc:
+            # Never let the stream die: pass the raw vocal through this block.
+            self.callback_errors += 1
+            self.last_callback_error = repr(exc)[:300]
+            try:
+                ch = min(self.mic_channel, indata.shape[1] - 1)
+                mic = np.nan_to_num(np.asarray(indata[:, ch], dtype=np.float64))
+                outdata[:] = np.clip(mic, -1.0, 1.0)[:len(outdata), None].astype(np.float32)
+            except Exception:
+                outdata.fill(0)
+
+    def _process(self, indata, outdata, frames, status):
         started = time.perf_counter()
         # Don't print from the audio thread -- console I/O can block long
         # enough to cause the very dropouts being reported. Just count them.
@@ -493,6 +555,9 @@ class AudioEngine:
             "output_gain_db": round(self.output_gain.db, 1),
             "limited_blocks": self.limited_blocks,
             "mic_and_reference_same_signal": self.same_signal,
+            "callback_errors": self.callback_errors,
+            "last_callback_error": self.last_callback_error,
+            "stream_restarts": self.stream_restarts,
             "gate": {"threshold_linear": self.gate.threshold_linear,
                      "attack_ms": self.gate.attack_ms, "release_ms": self.gate.release_ms},
             "history_per_second": [

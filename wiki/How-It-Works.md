@@ -94,8 +94,11 @@ block passes the mic through untouched, with the join smoothed so it doesn't
 click.
 
 A simple envelope gate/expander after the filter. Below the threshold, the
-output is scaled down in proportion to how far below it is. Attack and
-release control how fast it opens and closes.
+output is scaled down in proportion to how far below it is, by at most
+20 dB: it can tuck away leftover room sound between phrases, but it never
+silences the singer. Attack and release control how fast it opens and
+closes. The default threshold is −50 dBFS, low enough that soft singing
+on a console's USB or Dante send (often −30 to −45 dBFS) passes untouched.
 
 ## Remote control
 

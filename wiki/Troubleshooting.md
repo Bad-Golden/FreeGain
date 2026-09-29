@@ -74,6 +74,17 @@ FreeGain goes back to cancelling by itself about a second later.
   effects.
 - Press **Save diagnostics…** and send the file.
 
+**The vocal cuts out / quiet words disappear**
+- Update to 0.4.4 or later. Earlier versions had a gate threshold of
+  −34 dBFS that could chop soft singing on normal console send levels
+  (settings still on that old default are moved to −50 automatically).
+- Lower the gate **Threshold** (−55 or −60 effectively turns it off).
+- If *everything* goes silent and the meters stop: the audio device
+  dropped out. FreeGain now reconnects by itself within a few seconds and
+  says so in the status line. If it keeps happening, check the USB cable
+  and hub, and turn off USB power saving in Windows.
+- If the **dropouts** counter climbs, the computer can't keep up (see below).
+
 **The voice sounds warbly, thin or phasey**
 - Make sure **Vocal goes back to the PA (feedback mode)** is ticked if
   FreeGain's output reaches the PA or monitors. Without it, the filter can

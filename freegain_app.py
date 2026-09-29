@@ -26,6 +26,7 @@ from tkinter import filedialog, ttk, messagebox
 
 import diagnostics
 from audio_engine import DEFAULT_TAIL_MS, TAIL_OPTIONS_MS, AudioEngine
+from simple_gate import DEFAULT_THRESHOLD_DB
 from version import __version__
 from consoles import (CONSOLE_PROFILES, DEFAULT_PROFILE, AudioOnlyDriver, brands,
                       create_driver, models_for_brand)
@@ -71,7 +72,7 @@ DEFAULT_CONFIG = {
     "output_device": None,
     "mic_channel": 0,
     "reference_channel": 1,
-    "gate_threshold_db": -34.0,
+    "gate_threshold_db": DEFAULT_THRESHOLD_DB,
     "gate_attack_ms": 3.0,
     "gate_release_ms": 180.0,
     "tail_ms": DEFAULT_TAIL_MS,
@@ -97,6 +98,11 @@ def load_config() -> dict:
         config["console_type"] = DEFAULT_PROFILE
     if not isinstance(config["console_options"], dict):
         config["console_options"] = {}
+    # Versions up to 0.4.3 defaulted the gate to -34 dBFS, which cut quiet
+    # singing on typical console USB/Dante levels. Move anyone still on that
+    # old default to the new one (a deliberately chosen value is kept).
+    if config["gate_threshold_db"] == -34.0:
+        config["gate_threshold_db"] = DEFAULT_THRESHOLD_DB
     return config
 
 
@@ -703,6 +709,12 @@ class FreeGainApp:
 
     def _schedule_ui_refresh(self):
         self._drain_console_events()
+        # About once a second: bring the audio back if the device dropped out.
+        self._refresh_ticks = getattr(self, "_refresh_ticks", 0) + 1
+        if self._refresh_ticks % 30 == 0:
+            message = self.engine.check_stream()
+            if message:
+                self._set_status(message)
         self._update_connection_label()
 
         engine = self.engine

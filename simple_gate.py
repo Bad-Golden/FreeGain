@@ -4,6 +4,12 @@ simple_gate.py
 Basic envelope-follower gate/expander. Mirrors the JUCE version's behavior:
 attenuates the signal below a threshold, with separate attack/release
 time constants.
+
+The attenuation is capped at RANGE_DB: the gate can dip the leftover
+between phrases, but never silences the singer. Stress test: with the old
+uncapped gate and a -34 dBFS threshold, a vocal whose loudest phrases sat
+at -30 dBFS (normal for a console's USB/Dante send) lost ~20% of the
+singing to cut-outs.
 """
 
 import math
@@ -11,8 +17,12 @@ import math
 import numpy as np
 
 
+DEFAULT_THRESHOLD_DB = -50.0
+RANGE_DB = 20.0          # maximum attenuation
+
+
 class SimpleGate:
-    def __init__(self, threshold_db: float = -34.0, attack_ms: float = 3.0,
+    def __init__(self, threshold_db: float = DEFAULT_THRESHOLD_DB, attack_ms: float = 3.0,
                  release_ms: float = 180.0, sample_rate: float = 44100.0):
         self.sample_rate = float(sample_rate)
         self.attack_ms = attack_ms
@@ -20,7 +30,8 @@ class SimpleGate:
         self.set_threshold_db(threshold_db)
         self.set_timing(attack_ms, release_ms)
         self.envelope = 0.0
-        self._gain_prev = 0.0
+        self.floor = 10.0 ** (-RANGE_DB / 20.0)
+        self._gain_prev = self.floor
 
     def set_threshold_db(self, threshold_db: float):
         self.threshold_linear = 10.0 ** (threshold_db / 20.0)
@@ -38,7 +49,7 @@ class SimpleGate:
 
     def reset(self):
         self.envelope = 0.0
-        self._gain_prev = 0.0
+        self._gain_prev = self.floor
 
     def _coeff(self, time_ms: float) -> float:
         return 1.0 - math.exp(-1.0 / (max(time_ms, 0.01) * 0.001 * self.sample_rate))
@@ -53,7 +64,7 @@ class SimpleGate:
             self.envelope = 0.0
         if self.envelope >= self.threshold_linear:
             return sample
-        return sample * (self.envelope / self.threshold_linear)
+        return sample * max(self.floor, self.envelope / self.threshold_linear)
 
     CHUNK = 16   # samples per envelope step in process_block (0.33 ms at 48 kHz)
 
@@ -70,6 +81,7 @@ class SimpleGate:
         # mid-block can't produce a half-updated pair.
         attack, release = self.attack_coeff, self.release_coeff
         threshold = self.threshold_linear
+        floor = self.floor
         x = np.asarray(block, dtype=np.float64)
         if not np.all(np.isfinite(x)):
             x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
@@ -89,10 +101,10 @@ class SimpleGate:
         gains[0] = self._gain_prev
         for i, peak in enumerate(peaks):
             env += (a_c if peak > env else r_c) * (peak - env)
-            gains[i + 1] = 1.0 if env >= threshold else env / threshold
+            gains[i + 1] = 1.0 if env >= threshold else max(floor, env / threshold)
         if not math.isfinite(env):
             env = 0.0
-            gains[~np.isfinite(gains)] = 0.0
+            gains[~np.isfinite(gains)] = floor
         self.envelope = env
         self._gain_prev = float(gains[-1])
         # Linear gain ramp from the previous chunk's gain to this chunk's.

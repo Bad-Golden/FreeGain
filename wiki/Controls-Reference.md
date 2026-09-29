@@ -34,7 +34,7 @@
 | **Mic gain** | −24 to +24 dB. Boosts or trims the vocal after echo cancelling and before the gate (so it also moves the vocal relative to the gate threshold). Changing it never forces a relearn. The Input meter shows the mic after this gain. Double-click to reset to 0 dB |
 | **Output level** | −40 to +12 dB. The final level sent back to the console. Double-click to reset to 0 dB |
 | **LIMIT** | Lights red when the soft output limiter is working (output within 1 dB of full scale). If it's on a lot, turn **Output level** down |
-| **Threshold** | Gate threshold, −60 to 0 dB. Below it the output is turned down |
+| **Threshold** | Gate threshold, −60 to 0 dB (default −50). Below it the output is turned down, by at most 20 dB, so the vocal is never silenced. If quiet words sound dipped, lower it |
 | **Attack** | How fast the gate opens, 0.5–50 ms |
 | **Release** | How fast the gate closes, 10–1000 ms |
 | **Output meter** | Processed vocal level |
